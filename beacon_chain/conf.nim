@@ -22,7 +22,7 @@ import
   eth/p2p/discoveryv5/enr,
   json_serialization, web3/[primitives, confutils_defs],
   chronos/transports/common,
-  kzg4844/kzg_ex,
+  kzg4844/kzg,
   ./spec/[engine_authentication, keystore, network, crypto],
   ./spec/datatypes/base,
   ./networking/network_metadata,
@@ -32,8 +32,6 @@ import
 
 from std/os import getHomeDir, parentDir, `/`
 from std/strutils import parseBiggestUInt, replace
-from fork_choice/fork_choice_types
-  import ForkChoiceVersion
 from consensus_object_pools/block_pools_types_light_client
   import LightClientDataImportMode
 
@@ -331,12 +329,6 @@ type
               "This option allows to enable/disable this functionality"
         defaultValue: false
         name: "enr-auto-update" .}: bool
-
-      enableYamux* {.
-        hidden
-        desc: "Enable the Yamux multiplexer"
-        defaultValue: false
-        name: "debug-enable-yamux" .}: bool
 
       weakSubjectivityCheckpoint* {.
         desc: "Weak subjectivity checkpoint in the format block_root:epoch_number"
@@ -675,12 +667,6 @@ type
         hidden
         desc: "Bandwidth estimate for the node (bits per second)"
         name: "debug-bandwidth-estimate" .}: Option[Natural]
-
-      forkChoiceVersion* {.
-        hidden
-        desc: "Forkchoice version to use. " &
-              "Must be one of: stable"
-        name: "debug-forkchoice-version" .}: Option[ForkChoiceVersion]
 
     of BNStartUpCmd.wallets:
       case walletsCmd* {.command.}: WalletsCmd
@@ -1141,6 +1127,8 @@ type
 
   AnyConf* = BeaconNodeConf | ValidatorClientConf | SigningNodeConf
 
+  Address = primitives.Address
+
 proc defaultDataDir*[Conf](config: Conf): string =
   let dataDir = when defined(windows):
     "AppData" / "Roaming" / "Nimbus"
@@ -1508,11 +1496,11 @@ proc loadKzgTrustedSetup*(): Result[void, string] =
       vendorDir & "/nim-kzg4844/kzg4844/csources/src/trusted_setup.txt")
 
   static: doAssert const_preset in ["mainnet", "gnosis", "minimal"]
-  Kzg.loadTrustedSetupFromString(trustedSetup)
+  loadTrustedSetupFromString(trustedSetup, 0)
 
 proc loadKzgTrustedSetup*(trustedSetupPath: string): Result[void, string] =
   try:
-    Kzg.loadTrustedSetupFromString(readFile(trustedSetupPath))
+    loadTrustedSetupFromString(readFile(trustedSetupPath), 0)
   except IOError as err:
     err(err.msg)
 
