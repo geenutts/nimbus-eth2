@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -26,6 +26,16 @@ type
       privateKey: ValidatorPrivKey
     of ValidatorStorageKind.Identifier:
       ident: ValidatorIdent
+
+static: doAssert(high(ConsensusFork) == ConsensusFork.Fulu,
+          "Update OptionalForks constant!")
+const
+  OptionalForks* = {ConsensusFork.Electra, ConsensusFork.Fulu}
+    ## When a new ConsensusFork is added and before this fork is activated on
+    ## `mainnet`, it should be part of `OptionalForks`.
+    ## In this case, the client will ignore missing <FORKNAME>_VERSION
+    ## and <FORKNAME>_EPOCH constants from the data reported by BN via
+    ## `/eth/v1/config/spec` API call.
 
 proc getSignedExitMessage(
        config: BeaconNodeConf,
@@ -149,8 +159,16 @@ func getIdent*(storage: ValidatorStorage): ValidatorIdent =
 
 proc restValidatorExit(config: BeaconNodeConf) {.async.} =
   let
-    client = RestClientRef.new(config.restUrlForExit).valueOr:
-      raise (ref RestError)(msg: $error)
+    client =
+      block:
+        let
+          flags = {RestClientFlag.CommaSeparatedArray,
+                   RestClientFlag.ResolveAlways}
+          socketFlags = {SocketFlags.TcpNoDelay}
+
+        RestClientRef.new(config.restUrlForExit, flags = flags,
+                          socketFlags = socketFlags).valueOr:
+          raise (ref RestError)(msg: $error)
 
     stateIdHead = StateIdent(kind: StateQueryKind.Named,
                              value: StateIdentType.Head)
@@ -220,19 +238,30 @@ proc restValidatorExit(config: BeaconNodeConf) {.async.} =
            reason = exc.msg
     quit 1
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.6/specs/phase0/beacon-chain.md#voluntary-exits
+  # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#voluntary-exits
   # https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.0/specs/deneb/beacon-chain.md#modified-process_voluntary_exit
   let signingFork = try:
     let response = await client.getSpecVC()
     if response.status == 200:
-      let forkConfig = response.data.data.getConsensusForkConfig()
+      let forkConfig =
+        response.data.data.getConsensusForkConfig(OptionalForks)
       if forkConfig.isErr:
         raise newException(RestError, "Invalid config: " & forkConfig.error)
-      let capellaForkVersion = forkConfig.get.capellaVersion.valueOr:
-        raise newException(RestError,
-          ConsensusFork.Capella.forkVersionConfigKey() & " missing")
+      let
+        capellaForkVersion =
+          try:
+            forkConfig.get()[ConsensusFork.Capella].version
+          except KeyError:
+            raise newException(RestError,
+              ConsensusFork.Capella.forkVersionConfigKey() & " missing")
+        denebForkEpoch =
+          try:
+            forkConfig.get()[ConsensusFork.Deneb].epoch
+          except KeyError:
+            raise newException(RestError,
+              ConsensusFork.Deneb.forkEpochConfigKey() & " missing")
       voluntary_exit_signature_fork(
-        fork, capellaForkVersion, currentEpoch, forkConfig.get.denebEpoch)
+        fork, capellaForkVersion, currentEpoch, denebForkEpoch)
     else:
       raise newException(RestError, "Error response (" & $response.status & ")")
   except CatchableError as exc:

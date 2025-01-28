@@ -130,10 +130,8 @@ proc loadSteps(
 proc runTest(suiteName, path: string, consensusFork: static ConsensusFork) =
   let relativePathComponent = path.relativeTestPathComponent()
   test "Light client - Data collection - " & relativePathComponent:
-    let (cfg, unknowns) = readRuntimeConfig(path/"config.yaml")
-    doAssert unknowns.len == 0
-
     let
+      (cfg, _) = readRuntimeConfig(path/"config.yaml")
       initial_state = loadForkedState(
         path/"initial_state.ssz_snappy", consensusFork)
       db = BeaconChainDB.new("", cfg = cfg, inMemory = true)
@@ -146,7 +144,7 @@ proc runTest(suiteName, path: string, consensusFork: static ConsensusFork) =
         lcDataConfig = LightClientDataConfig(
           serve: true, importMode: LightClientDataImportMode.Full))
       rng = HmacDrbgContext.new()
-      taskpool = TaskPool.new()
+      taskpool = Taskpool.new()
     var
       verifier = BatchVerifier.init(rng, taskpool)
       quarantine = newClone(Quarantine.init())

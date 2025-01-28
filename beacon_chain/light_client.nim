@@ -86,7 +86,8 @@ proc createLightClient(
     getBeaconTime: GetBeaconTimeFn,
     genesis_validators_root: Eth2Digest,
     finalizationMode: LightClientFinalizationMode,
-    strictVerification = false
+    strictVerification = false,
+    shouldInhibitSync: light_client_manager.GetBoolCallback = nil
 ): LightClient =
   let lightClient = LightClient(
     network: network,
@@ -177,7 +178,8 @@ proc createLightClient(
     lightClient.network, rng, getTrustedBlockRoot,
     bootstrapVerifier, updateVerifier, finalityVerifier, optimisticVerifier,
     isLightClientStoreInitialized, isNextSyncCommitteeKnown,
-    getFinalizedPeriod, getOptimisticPeriod, getBeaconTime)
+    getFinalizedPeriod, getOptimisticPeriod, getBeaconTime,
+    shouldInhibitSync = shouldInhibitSync)
 
   lightClient.gossipState = {}
 
@@ -191,13 +193,15 @@ proc createLightClient*(
     forkDigests: ref ForkDigests,
     getBeaconTime: GetBeaconTimeFn,
     genesis_validators_root: Eth2Digest,
-    finalizationMode: LightClientFinalizationMode
+    finalizationMode: LightClientFinalizationMode,
+    shouldInhibitSync: light_client_manager.GetBoolCallback = nil
 ): LightClient =
   createLightClient(
     network, rng,
     config.dumpEnabled, config.dumpDirInvalid, config.dumpDirIncoming,
     cfg, forkDigests, getBeaconTime, genesis_validators_root, finalizationMode,
-    strictVerification = config.strictVerification)
+    strictVerification = config.strictVerification,
+    shouldInhibitSync = shouldInhibitSync)
 
 proc createLightClient*(
     network: Eth2Node,
@@ -207,12 +211,14 @@ proc createLightClient*(
     forkDigests: ref ForkDigests,
     getBeaconTime: GetBeaconTimeFn,
     genesis_validators_root: Eth2Digest,
-    finalizationMode: LightClientFinalizationMode
+    finalizationMode: LightClientFinalizationMode,
+    shouldInhibitSync: light_client_manager.GetBoolCallback = nil
 ): LightClient =
   createLightClient(
     network, rng,
     dumpEnabled = false, dumpDirInvalid = ".", dumpDirIncoming = ".",
-    cfg, forkDigests, getBeaconTime, genesis_validators_root, finalizationMode)
+    cfg, forkDigests, getBeaconTime, genesis_validators_root, finalizationMode,
+    shouldInhibitSync = shouldInhibitSync)
 
 proc start*(lightClient: LightClient) =
   notice "Starting light client",
@@ -383,8 +389,8 @@ proc updateGossipStatus*(
 
     currentEpochTargetGossipState = getTargetGossipState(
       epoch, cfg.ALTAIR_FORK_EPOCH, cfg.BELLATRIX_FORK_EPOCH,
-      cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, FAR_FUTURE_EPOCH,
-      isBehind)
+      cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, cfg.ELECTRA_FORK_EPOCH,
+      cfg.FULU_FORK_EPOCH, isBehind)
     targetGossipState =
       if lcBehind or epoch < 1:
         currentEpochTargetGossipState
@@ -394,8 +400,8 @@ proc updateGossipStatus*(
         # Therefore, LC topic subscriptions are kept for 1 extra epoch.
         let previousEpochTargetGossipState = getTargetGossipState(
           epoch - 1, cfg.ALTAIR_FORK_EPOCH, cfg.BELLATRIX_FORK_EPOCH,
-          cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, FAR_FUTURE_EPOCH,
-          isBehind)
+          cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, cfg.ELECTRA_FORK_EPOCH,
+          cfg.FULU_FORK_EPOCH, isBehind)
         currentEpochTargetGossipState + previousEpochTargetGossipState
 
   template currentGossipState(): auto = lightClient.gossipState

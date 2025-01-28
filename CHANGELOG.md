@@ -1,3 +1,145 @@
+2025-01-28 v25.1.0
+==================
+
+Nimbus `v25.1.0` is a `medium-urgency` release with a gas limit increase, along with beacon API and security fixes.
+
+### Improvements
+
+* Increase builder API default gas limit to 36M:
+  https://github.com/status-im/nimbus-eth2/pull/6763
+
+### Fixes
+
+* With multiple execution clients, wait for valid block response before concluding block is not valid:
+  https://github.com/status-im/nimbus-eth2/pull/6812
+
+* Fix Docker image regression from v24.11.0 which could prevent starting beacon node:
+  https://github.com/status-im/nimbus-eth2/pull/6803
+
+* Fix validator voluntary exiting given potential discrepancies about future fork scheduling:
+  https://github.com/status-im/nimbus-eth2/pull/6811
+
+* Fix `sync_aggregate` value in `getBlockRewards` beacon API endpoint:
+  https://github.com/status-im/nimbus-eth2/pull/6829
+
+* Fix `last_seen_p2p_address` value in `getPeers` beacon API endpoint:
+  https://github.com/status-im/nimbus-eth2/pull/6595
+
+2024-12-12 v24.12.0
+===================
+
+Nimbus `v24.12.0` is a `low-urgency` release.
+
+### Improvements
+
+* Support `bootstrap_nodes.yaml` bootstrap node specification:
+  https://github.com/status-im/nimbus-eth2/pull/6751
+
+2024-11-29 v24.11.0
+===================
+
+Nimbus `v24.11.0` is a `low-urgency` release with performance and compatibility improvements.
+
+### Improvements
+
+* Update Holesky bootnodes:
+  https://github.com/status-im/nimbus-eth2/pull/6703
+
+* Improve forward syncing performance:
+  https://github.com/status-im/nimbus-eth2/pull/6682
+
+* Experimental light client-based sync method, for testing only:
+  https://github.com/status-im/nimbus-eth2/pull/6515
+
+### Fixes
+
+* Avoid validator client network configuration mismatch errors pertaining to unscheduled forks:
+  https://github.com/status-im/nimbus-eth2/pull/6698
+
+2024-10-29 v24.10.0
+===================
+
+Nimbus `v24.10.0` is a `low-urgency` release with performance improvements and stability fixes. It is `high-urgency` in specific cases where the beacon REST API might be externally exposed, which is not the default configuration.
+
+### Improvements
+
+* Improve performance for syncing with a timing-out or nonresponsive execution client:
+  https://github.com/status-im/nimbus-eth2/pull/6665
+
+* Increase execution payload block hash verification performance for optimistic sync by 100x:
+  https://github.com/status-im/nimbus-eth2/pull/6610
+
+* Increase validator client scalability with number of validators:
+  https://github.com/status-im/nimbus-eth2/pull/6609
+
+### Fixes
+
+* Fix crash on overlong JSON array reading:
+  https://github.com/status-im/nimbus-eth2/pull/6674
+
+* Fix infinite loop in validator client when all validators lack indices:
+  https://github.com/status-im/nimbus-eth2/pull/6615
+
+2024-09-30 v24.9.0
+==================
+
+Nimbus `v24.9.0` is a `low-urgency` release with beacon API improvements and stability fixes.
+
+### Improvements
+
+* Add support for getBlockRewards and getSyncCommitteeRewards beacon API endpoints:
+  https://github.com/status-im/nimbus-eth2/pull/6556
+
+* Add support for publishAggregateAndProofsV2 beacon API endpoint:
+  https://github.com/status-im/nimbus-eth2/pull/6546
+
+* Add support for getPoolAttestationsV2 beacon API endpoint:
+  https://github.com/status-im/nimbus-eth2/pull/6511
+
+### Fixes
+
+* Web3signer always resolves DNS hostnames:
+  https://github.com/status-im/nimbus-eth2/pull/6567
+
+* Avoid potential crash while initializing UPnP:
+  https://github.com/status-im/nimbus-eth2/pull/6538
+
+* Fix missing field values in Deneb and Electra getBlindedBlock beacon API endpoint responses:
+  https://github.com/status-im/nimbus-eth2/pull/6569
+
+2024-08-29 v24.8.0
+==================
+
+Nimbus `v24.8.0` is a `low-urgency` release with beacon API improvements and fixes.
+
+### Improvements
+
+* Increase speed of processing blocks with deposits by 25%:
+  https://github.com/status-im/nimbus-eth2/pull/6469
+
+* Avoid running light client sync in background when node is synced:
+  https://github.com/status-im/nimbus-eth2/pull/6505
+
+* Add additional Sepolia bootnode:
+  https://github.com/status-im/nimbus-eth2/pull/6490
+
+### Fixes
+
+* Add timeouts to failed execution layer requests:
+  https://github.com/status-im/nimbus-eth2/pull/6441
+
+* Use correct fork digest when broadcasting blob sidecars, sync committee, and sync contribution messages:
+  https://github.com/status-im/nimbus-eth2/pull/6440
+
+* Fix Holesky genesis state being downloaded multiple times:
+  https://github.com/status-im/nimbus-eth2/pull/6452
+
+* Check blob versioned hashes when optimistic syncing:
+  https://github.com/status-im/nimbus-eth2/pull/6501
+
+* Increase trusted node sync state downloading timeout to 120 seconds:
+  https://github.com/status-im/nimbus-eth2/pull/6487
+
 2024-07-29 v24.7.0
 ==================
 
@@ -2292,7 +2434,7 @@ It also brings further performance optimizations.
 * A new `slashingdb` sub-command with `import` and `export` options. This allows for
   safely migrating to Nimbus from another client (as per the [EIP-3076](https://eips.ethereum.org/EIPS/eip-3076)
   slashing protection interchange format).
-  Please see the the newly prepared [migration guides](https://nimbus.guide/migration.html) for the details.
+  Please see the newly prepared [migration guides](https://nimbus.guide/migration.html) for the details.
 
 * A new `ncli_db validatorPerf` command. This can be used to perform a textual
   report for the attestation performance of a particular validator

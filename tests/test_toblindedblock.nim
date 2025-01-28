@@ -12,7 +12,8 @@ import
   # Beacon chain internals
   ../beacon_chain/spec/helpers,
   ../beacon_chain/spec/datatypes/[bellatrix, capella],
-  ../beacon_chain/spec/mev/[bellatrix_mev, capella_mev, deneb_mev, electra_mev],
+  ../beacon_chain/spec/mev/[bellatrix_mev, capella_mev, deneb_mev, electra_mev,
+    fulu_mev],
   # Test utilities
   unittest2
 
@@ -112,32 +113,46 @@ template capella_steps() =
   do_check
 
 template deneb_steps() =
+  b.message.body.execution_payload.blob_gas_used = 8
+  do_check
+  b.message.body.execution_payload.excess_blob_gas = 9
+  do_check
   check: b.message.body.blob_kzg_commitments.add(default(KzgCommitment))
   do_check
 
+template electra_steps() =
+  check: b.message.body.execution_requests.deposits.add(
+    default(DepositRequest))
+  do_check
+  check: b.message.body.execution_requests.withdrawals.add(
+    default(WithdrawalRequest))
+  do_check
+  check: b.message.body.execution_requests.consolidations.add(
+    default(ConsolidationRequest))
+  do_check
+
+template fulu_steps() =
+  check: b.message.body.execution_requests.deposits.add(
+    default(DepositRequest))
+  do_check
+  check: b.message.body.execution_requests.withdrawals.add(
+    default(WithdrawalRequest))
+  do_check
+  check: b.message.body.execution_requests.consolidations.add(
+    default(ConsolidationRequest))
+  do_check
+
 suite "Blinded block conversions":
-  test "Bellatrix toSignedBlindedBlock":
-    var b = default(bellatrix.SignedBeaconBlock)
-    do_check
-    bellatrix_steps
-
-  test "Capella toSignedBlindedBlock":
-    var b = default(capella.SignedBeaconBlock)
-    do_check
-    bellatrix_steps
-    capella_steps
-
-  test "Deneb toSignedBlindedBlock":
-    var b = default(deneb.SignedBeaconBlock)
-    do_check
-    bellatrix_steps
-    capella_steps
-    deneb_steps
-
-  test "Electra toSignedBlindedBlock":
-    var b = default(electra.SignedBeaconBlock)
-    do_check
-    bellatrix_steps
-    capella_steps
-    deneb_steps
-    debugComment "add electra_steps"
+  withAll(ConsensusFork):
+    when consensusFork >= ConsensusFork.Bellatrix:
+      test $consensusFork & " toSignedBlindedBeaconBlock":
+        var b = default(consensusFork.SignedBeaconBlock)
+        do_check
+        bellatrix_steps
+        when consensusFork >= ConsensusFork.Capella:
+          capella_steps
+        when consensusFork >= ConsensusFork.Deneb:
+          deneb_steps
+        when consensusFork >= ConsensusFork.Electra:
+          electra_steps
+        static: doAssert high(ConsensusFork) == ConsensusFork.Fulu

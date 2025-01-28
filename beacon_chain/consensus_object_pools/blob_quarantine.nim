@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -15,7 +15,7 @@ from std/sequtils import mapIt
 from std/strutils import join
 
 const
-  MaxBlobs = 3 * SLOTS_PER_EPOCH * MAX_BLOBS_PER_BLOCK
+  MaxBlobs = 3 * SLOTS_PER_EPOCH * MAX_BLOBS_PER_BLOCK_ELECTRA
     ## Same limit as `MaxOrphans` in `block_quarantine`;
     ## blobs may arrive before an orphan is tagged `blobless`
 
@@ -29,7 +29,8 @@ type
     block_root*: Eth2Digest
     indices*: seq[BlobIndex]
 
-  OnBlobSidecarCallback = proc(data: BlobSidecar) {.gcsafe, raises: [].}
+  OnBlobSidecarCallback = proc(
+      data: BlobSidecarInfoObject) {.gcsafe, raises: [].}
 
 func shortLog*(x: seq[BlobIndex]): string =
   "<" & x.mapIt($it).join(", ") & ">"
@@ -71,7 +72,8 @@ func hasBlob*(
 
 func popBlobs*(
     quarantine: var BlobQuarantine, digest: Eth2Digest,
-    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock):
+    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock |
+          fulu.SignedBeaconBlock):
     seq[ref BlobSidecar] =
   var r: seq[ref BlobSidecar] = @[]
   for idx, kzg_commitment in blck.message.body.blob_kzg_commitments:
@@ -81,14 +83,18 @@ func popBlobs*(
   r
 
 func hasBlobs*(quarantine: BlobQuarantine,
-    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock): bool =
+    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock |
+          fulu.SignedBeaconBlock): bool =
+    # Having a fulu SignedBeaconBlock is incorrect atm, but
+    # shall be fixed once data columns are rebased to fulu
   for idx, kzg_commitment in blck.message.body.blob_kzg_commitments:
     if (blck.root, BlobIndex idx, kzg_commitment) notin quarantine.blobs:
       return false
   true
 
 func blobFetchRecord*(quarantine: BlobQuarantine,
-    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock): BlobFetchRecord =
+    blck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock |
+          fulu.SignedBeaconBlock): BlobFetchRecord =
   var indices: seq[BlobIndex]
   for i in 0..<len(blck.message.body.blob_kzg_commitments):
     let idx = BlobIndex(i)

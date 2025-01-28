@@ -26,18 +26,16 @@ import
 export results, rand, altair, phase0, taskpools, signatures
 
 type
-  TaskPoolPtr* = Taskpool
-
   BatchVerifier* = object
     sigVerifCache*: BatchedBLSVerifierCache
       ## A cache for batch BLS signature verification contexts
     rng*: ref HmacDrbgContext
       ## A reference to the Nimbus application-wide RNG
-    taskpool*: TaskPoolPtr
+    taskpool*: Taskpool
 
 proc init*(
     T: type BatchVerifier, rng: ref HmacDrbgContext,
-    taskpool: TaskPoolPtr): BatchVerifier =
+    taskpool: Taskpool): BatchVerifier =
   BatchVerifier(
     sigVerifCache: BatchedBLSVerifierCache.init(taskpool),
     rng: rng,
@@ -46,7 +44,7 @@ proc init*(
 
 proc new*(
     T: type BatchVerifier, rng: ref HmacDrbgContext,
-    taskpool: TaskPoolPtr): ref BatchVerifier =
+    taskpool: Taskpool): ref BatchVerifier =
   (ref BatchVerifier)(
     sigVerifCache: BatchedBLSVerifierCache.init(taskpool),
     rng: rng,
@@ -83,7 +81,7 @@ func aggregateAttesters(
     # Aggregation spec requires non-empty collection
     # - https://tools.ietf.org/html/draft-irtf-cfrg-bls-signature-04
     # Consensus specs require at least one attesting index in attestation
-    # - https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/phase0/beacon-chain.md#is_valid_indexed_attestation
+    # - https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#is_valid_indexed_attestation
     return err("aggregateAttesters: no attesting indices")
 
   let
@@ -164,7 +162,7 @@ func block_signature_set*(
 # See also: verify_aggregate_and_proof_signature
 func aggregate_and_proof_signature_set*(
     fork: Fork, genesis_validators_root: Eth2Digest,
-    aggregate_and_proof: phase0.AggregateAndProof,
+    aggregate_and_proof: phase0.AggregateAndProof | electra.AggregateAndProof,
     pubkey: CookedPubKey, signature: CookedSig): SignatureSet =
   let signing_root = compute_aggregate_and_proof_signing_root(
     fork, genesis_validators_root, aggregate_and_proof)
@@ -228,6 +226,38 @@ func bls_to_execution_change_signature_set*(
     genesisFork, genesis_validators_root, msg)
 
   SignatureSet.init(pubkey, signing_root, signature)
+
+proc collectProposerSignatureSet*(
+  sigs: var seq[SignatureSet],
+  blocks: openArray[ForkedSignedBeaconBlock],
+  validatorKeys: openArray[ImmutableValidatorData2],
+  fork: Fork,
+  genesis_validators_root: Eth2Digest
+): Result[void, string] =
+  mixin load
+
+  for forkedBlock in blocks:
+    let item =
+      withBlck(forkedBlock):
+        let
+          proposerKey =
+            validatorKeys.load(forkyBlck.message.proposer_index).valueOr:
+              let msg = "collectProposerSignatureSet: " &
+                        "invalid proposer index (" &
+                        $forkyBlck.message.proposer_index & ")"
+              return err(msg)
+          signature =
+            forkyBlck.signature.load().valueOr:
+              let msg = "collectProposerSignatureSet: " &
+                        "cannot load signature (" &
+                        $ forkyBlck.signature & ")"
+              return err(msg)
+        block_signature_set(
+          fork, genesis_validators_root,
+          forkyBlck.message.slot, forkyBlck.root,
+          proposerKey, signature)
+    sigs.add(item)
+  ok()
 
 proc collectSignatureSets*(
        sigs: var seq[SignatureSet],

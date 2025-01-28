@@ -7,10 +7,6 @@
 
 {.push raises: [].}
 
-# At the time of writing, the exact definitions of what should be used for
-# cryptography in the spec is in flux, with sizes and test vectors still being
-# hashed out. This layer helps isolate those chagnes.
-
 # BLS signatures can be combined such that multiple signatures are aggregated.
 # Each time a new signature is added, the corresponding public key must be
 # added to the verification key as well - if a key signs twice, it must be added
@@ -207,7 +203,7 @@ func finish*(agg: AggregateSignature): CookedSig {.inline.} =
   sig.finish(agg)
   CookedSig(sig)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.6/specs/phase0/beacon-chain.md#bls-signatures
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#bls-signatures
 func blsVerify*(
     pubkey: CookedPubKey, message: openArray[byte],
     signature: CookedSig): bool =
@@ -220,7 +216,7 @@ func blsVerify*(
   ## to enforce correct usage.
   PublicKey(pubkey).verify(message, blscurve.Signature(signature))
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.6/specs/phase0/beacon-chain.md#bls-signatures
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#bls-signatures
 proc blsVerify*(
     pubkey: ValidatorPubKey, message: openArray[byte],
     signature: CookedSig): bool =
@@ -245,14 +241,14 @@ proc blsVerify*(
   # Guard against invalid signature blobs that fail to parse
   parsedSig.isSome() and blsVerify(pubkey, message, parsedSig.get())
 
-func blsVerify*(sigSet: SignatureSet): bool =
+func blsVerify*(sigset: SignatureSet): bool =
   ## Unbatched verification
   ## of 1 SignatureSet
   ## tuple[pubkey: blscurve.PublicKey, message: array[32, byte], blscurve.signature: Signature]
   verify(
-    sigSet.pubkey,
-    sigSet.message,
-    sigSet.signature
+    sigset.pubkey,
+    sigset.message,
+    sigset.signature
   )
 
 func blsSign*(privkey: ValidatorPrivKey, message: openArray[byte]): CookedSig =
@@ -402,6 +398,9 @@ func toHex*(x: CookedPubKey): string =
 
 func `$`*(x: CookedPubKey): string =
   $(x.toPubKey())
+
+func toValidatorSig*(x: TrustedSig): ValidatorSig =
+  ValidatorSig(blob: x.blob)
 
 func toValidatorSig*(x: CookedSig): ValidatorSig =
   ValidatorSig(blob: blscurve.Signature(x).exportRaw())

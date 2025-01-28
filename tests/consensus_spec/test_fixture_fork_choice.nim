@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -79,10 +79,6 @@ proc initialLoad(
       path/"anchor_state.ssz_snappy",
       StateType.kind)
 
-    blck = parseTest(
-      path/"anchor_block.ssz_snappy",
-      SSZ, BlockType)
-
   ChainDAGRef.preInit(db, forkedState[])
 
   let
@@ -90,8 +86,7 @@ proc initialLoad(
     dag = ChainDAGRef.init(
       forkedState[].kind.genesisTestRuntimeConfig, db, validatorMonitor, {})
     fkChoice = newClone(ForkChoice.init(
-      dag.getFinalizedEpochRef(), dag.finalizedHead.blck,
-      ForkChoiceVersion.Pr3431))
+      dag.getFinalizedEpochRef(), dag.finalizedHead.blck))
 
   (dag, fkChoice)
 
@@ -124,10 +119,7 @@ proc loadOps(
       doAssert step.hasKey"blobs" == step.hasKey"proofs"
       withConsensusFork(fork):
         let
-          blck = parseTest(
-            path/filename & ".ssz_snappy",
-            SSZ, consensusFork.SignedBeaconBlock)
-
+          blck = loadBlock(path/filename & ".ssz_snappy", consensusFork)
           blobData =
             when consensusFork >= ConsensusFork.Deneb:
               if step.hasKey"blobs":
@@ -201,7 +193,8 @@ proc stepOnBlock(
     state,
     dag.getBlockIdAtSlot(time.slotOrZero).expect("block exists"),
     save = false,
-    stateCache
+    stateCache,
+    dag.updateFlags
   )
 
   # 3. Add block to DAG

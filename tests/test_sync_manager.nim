@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2020-2024 Status Research & Development GmbH
+# Copyright (c) 2020-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -35,7 +35,7 @@ func getStats(peer: SomeTPeer, index: SyncResponseKind): uint64 =
   0
 
 func getStaticSlotCb(slot: Slot): GetSlotCallback =
-  proc getSlot(): Slot =
+  func getSlot(): Slot =
     slot
   getSlot
 
@@ -60,7 +60,7 @@ func collector(queue: AsyncQueue[BlockEntry]): BlockVerifier =
   return verify
 
 suite "SyncManager test suite":
-  proc createChain(start, finish: Slot): seq[ref ForkedSignedBeaconBlock] =
+  func createChain(start, finish: Slot): seq[ref ForkedSignedBeaconBlock] =
     doAssert(start <= finish)
     let count = int(finish - start + 1'u64)
     var res = newSeq[ref ForkedSignedBeaconBlock](count)
@@ -98,7 +98,7 @@ suite "SyncManager test suite":
                 inc sidecarIdx
     res
 
-  proc getSlice(chain: openArray[ref ForkedSignedBeaconBlock], startSlot: Slot,
+  func getSlice(chain: openArray[ref ForkedSignedBeaconBlock], startSlot: Slot,
                 request: SyncRequest[SomeTPeer]): seq[ref ForkedSignedBeaconBlock] =
     let
       startIndex = int(request.slot - startSlot)
@@ -488,7 +488,7 @@ suite "SyncManager test suite":
         else:
           sblock.fail(VerifierError.Duplicate)
 
-    proc getBackwardSafeSlotCb(): Slot =
+    func getBackwardSafeSlotCb(): Slot =
       min((Slot(counter).epoch + 1).start_slot, finish)
 
     proc forwardValidator(aq: AsyncQueue[BlockEntry]) {.async.} =
@@ -503,7 +503,7 @@ suite "SyncManager test suite":
         else:
           sblock.fail(VerifierError.Duplicate)
 
-    proc getFowardSafeSlotCb(): Slot =
+    func getFowardSafeSlotCb(): Slot =
       max(Slot(max(counter, 1) - 1).epoch.start_slot, start)
 
     var
@@ -578,11 +578,11 @@ suite "SyncManager test suite":
         let sblock = await aq.popFirst()
         sblock.fail(VerifierError.Invalid)
 
-    proc getBackwardSafeSlotCb(): Slot =
+    func getBackwardSafeSlotCb(): Slot =
       let progress = (uint64(int(finish) - counter) div chunkSize) * chunkSize
       finish - progress
 
-    proc getFowardSafeSlotCb(): Slot =
+    func getFowardSafeSlotCb(): Slot =
       let progress = (uint64(counter - int(start)) div chunkSize) * chunkSize
       start + progress
 
@@ -909,7 +909,7 @@ suite "SyncManager test suite":
       lastSafeSlot = finishSlot
       counter = int(finishSlot)
 
-    proc getSafeSlot(): Slot =
+    func getSafeSlot(): Slot =
       lastSafeSlot
 
     proc backwardValidator(aq: AsyncQueue[BlockEntry]) {.async.} =
@@ -1040,7 +1040,7 @@ suite "SyncManager test suite":
     check sr.getLastNonEmptySlot() == Slot(100)
 
   test "[SyncQueue] contains() test":
-    proc checkRange[T](req: SyncRequest[T]): bool =
+    func checkRange[T](req: SyncRequest[T]): bool =
       var slot = req.slot
       var counter = 0'u64
       while counter < req.count:
@@ -1059,36 +1059,134 @@ suite "SyncManager test suite":
       req1.contains(Slot(15)) == false
 
   test "[SyncQueue] checkResponse() test":
-    let chain = createChain(Slot(10), Slot(20))
-    let r1 = SyncRequest[SomeTPeer](slot: Slot(11), count: 1'u64)
-    let r21 = SyncRequest[SomeTPeer](slot: Slot(11), count: 2'u64)
-    let slots = mapIt(chain, it[].slot)
+    let
+      r1 = SyncRequest[SomeTPeer](slot: Slot(11), count: 1'u64)
+      r2 = SyncRequest[SomeTPeer](slot: Slot(11), count: 2'u64)
+      r3 = SyncRequest[SomeTPeer](slot: Slot(11), count: 3'u64)
 
     check:
-      checkResponse(r1, @[slots[1]]) == true
-      checkResponse(r1, @[]) == true
-      checkResponse(r1, @[slots[1], slots[1]]) == false
-      checkResponse(r1, @[slots[0]]) == false
-      checkResponse(r1, @[slots[2]]) == false
+      checkResponse(r1, [Slot(11)]).isOk() == true
+      checkResponse(r1, @[]).isOk() == true
+      checkResponse(r1, @[Slot(11), Slot(11)]).isOk() == false
+      checkResponse(r1, [Slot(10)]).isOk() == false
+      checkResponse(r1, [Slot(12)]).isOk() == false
 
-      checkResponse(r21, @[slots[1]]) == true
-      checkResponse(r21, @[]) == true
-      checkResponse(r21, @[slots[1], slots[2]]) == true
-      checkResponse(r21, @[slots[2]]) == true
-      checkResponse(r21, @[slots[1], slots[2], slots[3]]) == false
-      checkResponse(r21, @[slots[0], slots[1]]) == false
-      checkResponse(r21, @[slots[0]]) == false
-      checkResponse(r21, @[slots[2], slots[1]]) == false
-      checkResponse(r21, @[slots[2], slots[1]]) == false
-      checkResponse(r21, @[slots[2], slots[3]]) == false
-      checkResponse(r21, @[slots[3]]) == false
+      checkResponse(r2, [Slot(11)]).isOk() == true
+      checkResponse(r2, [Slot(12)]).isOk() == true
+      checkResponse(r2, @[]).isOk() == true
+      checkResponse(r2, [Slot(11), Slot(12)]).isOk() == true
+      checkResponse(r2, [Slot(12)]).isOk() == true
+      checkResponse(r2, [Slot(11), Slot(12), Slot(13)]).isOk() == false
+      checkResponse(r2, [Slot(10), Slot(11)]).isOk() == false
+      checkResponse(r2, [Slot(10)]).isOk() == false
+      checkResponse(r2, [Slot(12), Slot(11)]).isOk() == false
+      checkResponse(r2, [Slot(12), Slot(13)]).isOk() == false
+      checkResponse(r2, [Slot(13)]).isOk() == false
+
+      checkResponse(r2, [Slot(11), Slot(11)]).isOk() == false
+      checkResponse(r2, [Slot(12), Slot(12)]).isOk() == false
+
+      checkResponse(r3, @[Slot(11)]).isOk() == true
+      checkResponse(r3, @[Slot(12)]).isOk() == true
+      checkResponse(r3, @[Slot(13)]).isOk() == true
+      checkResponse(r3, @[Slot(11), Slot(12)]).isOk() == true
+      checkResponse(r3, @[Slot(11), Slot(13)]).isOk() == true
+      checkResponse(r3, @[Slot(12), Slot(13)]).isOk() == true
+      checkResponse(r3, @[Slot(11), Slot(13), Slot(12)]).isOk() == false
+      checkResponse(r3, @[Slot(12), Slot(13), Slot(11)]).isOk() == false
+      checkResponse(r3, @[Slot(13), Slot(12), Slot(11)]).isOk() == false
+      checkResponse(r3, @[Slot(13), Slot(11)]).isOk() == false
+      checkResponse(r3, @[Slot(13), Slot(12)]).isOk() == false
+      checkResponse(r3, @[Slot(12), Slot(11)]).isOk() == false
+
+      checkResponse(r3, @[Slot(11), Slot(11), Slot(11)]).isOk() == false
+      checkResponse(r3, @[Slot(11), Slot(12), Slot(12)]).isOk() == false
+      checkResponse(r3, @[Slot(11), Slot(13), Slot(13)]).isOk() == false
+      checkResponse(r3, @[Slot(12), Slot(13), Slot(13)]).isOk() == false
+      checkResponse(r3, @[Slot(12), Slot(12), Slot(12)]).isOk() == false
+      checkResponse(r3, @[Slot(13), Slot(13), Slot(13)]).isOk() == false
+      checkResponse(r3, @[Slot(11), Slot(11)]).isOk() == false
+      checkResponse(r3, @[Slot(12), Slot(12)]).isOk() == false
+      checkResponse(r3, @[Slot(13), Slot(13)]).isOk() == false
+
+  test "[SyncQueue] checkBlobsResponse() test":
+    let
+      r1 = SyncRequest[SomeTPeer](slot: Slot(11), count: 1'u64)
+      r2 = SyncRequest[SomeTPeer](slot: Slot(11), count: 2'u64)
+      r3 = SyncRequest[SomeTPeer](slot: Slot(11), count: 3'u64)
+
+      d1 = Slot(11).repeat(MAX_BLOBS_PER_BLOCK_ELECTRA)
+      d2 = Slot(12).repeat(MAX_BLOBS_PER_BLOCK_ELECTRA)
+      d3 = Slot(13).repeat(MAX_BLOBS_PER_BLOCK_ELECTRA)
+
+    check:
+      checkBlobsResponse(r1, [Slot(11)]).isOk() == true
+      checkBlobsResponse(r1, @[]).isOk() == true
+      checkBlobsResponse(r1, [Slot(11), Slot(11)]).isOk() == true
+      checkBlobsResponse(r1, [Slot(11), Slot(11), Slot(11)]).isOk() == true
+      checkBlobsResponse(r1, d1).isOk() == true
+      checkBlobsResponse(r1, d1 & @[Slot(11)]).isOk() == false
+      checkBlobsResponse(r1, [Slot(10)]).isOk() == false
+      checkBlobsResponse(r1, [Slot(12)]).isOk() == false
+
+      checkBlobsResponse(r2, [Slot(11)]).isOk() == true
+      checkBlobsResponse(r2, [Slot(12)]).isOk() == true
+      checkBlobsResponse(r2, @[]).isOk() == true
+      checkBlobsResponse(r2, [Slot(11), Slot(12)]).isOk() == true
+      checkBlobsResponse(r2, [Slot(11), Slot(11)]).isOk() == true
+      checkBlobsResponse(r2, [Slot(12), Slot(12)]).isOk() == true
+      checkBlobsResponse(r2, d1).isOk() == true
+      checkBlobsResponse(r2, d2).isOk() == true
+      checkBlobsResponse(r2, d1 & d2).isOk() == true
+      checkBlobsResponse(r2, [Slot(11), Slot(12), Slot(11)]).isOk() == false
+      checkBlobsResponse(r2, [Slot(12), Slot(11)]).isOk() == false
+      checkBlobsResponse(r2, d1 & @[Slot(11)]).isOk() == false
+      checkBlobsResponse(r2, d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r2, @[Slot(11)] & d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r2, d1 & d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r2, d2 & d1).isOk() == false
+
+      checkBlobsResponse(r3, [Slot(11)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(12)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(13)]).isOk() == true
+      checkBlobsResponse(r3, @[]).isOk() == true
+      checkBlobsResponse(r3, [Slot(11), Slot(12)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(11), Slot(11)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(12), Slot(12)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(11), Slot(13)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(12), Slot(13)]).isOk() == true
+      checkBlobsResponse(r3, [Slot(13), Slot(13)]).isOk() == true
+      checkBlobsResponse(r3, d1).isOk() == true
+      checkBlobsResponse(r3, d2).isOk() == true
+      checkBlobsResponse(r3, d3).isOk() == true
+      checkBlobsResponse(r3, d1 & d2).isOk() == true
+      checkBlobsResponse(r3, d1 & d3).isOk() == true
+      checkBlobsResponse(r3, d2 & d3).isOk() == true
+      checkBlobsResponse(r3, [Slot(11), Slot(12), Slot(11)]).isOk() == false
+      checkBlobsResponse(r3, [Slot(11), Slot(13), Slot(12)]).isOk() == false
+      checkBlobsResponse(r3, [Slot(12), Slot(13), Slot(11)]).isOk() == false
+      checkBlobsResponse(r3, [Slot(12), Slot(11)]).isOk() == false
+      checkBlobsResponse(r3, [Slot(13), Slot(12)]).isOk() == false
+      checkBlobsResponse(r3, [Slot(13), Slot(11)]).isOk() == false
+      checkBlobsResponse(r3, d1 & @[Slot(11)]).isOk() == false
+      checkBlobsResponse(r3, d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r3, d3 & @[Slot(13)]).isOk() == false
+      checkBlobsResponse(r3, @[Slot(11)] & d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r3, @[Slot(12)] & d3 & @[Slot(13)]).isOk() == false
+      checkBlobsResponse(r3, @[Slot(11)] & d3 & @[Slot(13)]).isOk() == false
+      checkBlobsResponse(r2, d1 & d2 & @[Slot(12)]).isOk() == false
+      checkBlobsResponse(r2, d1 & d3 & @[Slot(13)]).isOk() == false
+      checkBlobsResponse(r2, d2 & d3 & @[Slot(13)]).isOk() == false
+      checkBlobsResponse(r2, d2 & d1).isOk() == false
+      checkBlobsResponse(r2, d3 & d2).isOk() == false
+      checkBlobsResponse(r2, d3 & d1).isOk() == false
 
   test "[SyncManager] groupBlobs() test":
-    var blocks = createChain(Slot(10), Slot(15))
-    var blobs = createBlobs(blocks, @[Slot(11), Slot(11), Slot(12), Slot(14)])
+    var
+      blocks = createChain(Slot(10), Slot(15))
+      blobs = createBlobs(blocks, @[Slot(11), Slot(11), Slot(12), Slot(14)])
 
-    let req = SyncRequest[SomeTPeer](slot: Slot(10))
-    let groupedRes = groupBlobs(req, blocks, blobs)
+    let groupedRes = groupBlobs(blocks, blobs)
 
     check:
       groupedRes.isOk()
@@ -1118,7 +1216,7 @@ suite "SyncManager test suite":
     let block17 = newClone ForkedSignedBeaconBlock(kind: ConsensusFork.Deneb)
     block17[].denebData.message.slot = Slot(17)
     blocks.add(block17)
-    let groupedRes2 = groupBlobs(req, blocks, blobs)
+    let groupedRes2 = groupBlobs(blocks, blobs)
 
     check:
       groupedRes2.isOk()
@@ -1130,7 +1228,7 @@ suite "SyncManager test suite":
     let blob18 = new (ref BlobSidecar)
     blob18[].signed_block_header.message.slot = Slot(18)
     blobs.add(blob18)
-    let groupedRes3 = groupBlobs(req, blocks, blobs)
+    let groupedRes3 = groupBlobs(blocks, blobs)
 
     check:
       groupedRes3.isErr()

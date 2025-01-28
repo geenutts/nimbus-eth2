@@ -39,7 +39,7 @@ type
     inactivity_penalty*: Gwei
     slashing_outcome*: int64
     deposits*: Gwei
-    inclusion_delay*: Option[uint64]
+    inclusion_delay*: Opt[uint64]
 
   ParticipationFlags* = object
     currentEpochParticipation: EpochParticipationFlags
@@ -201,8 +201,9 @@ func collectSlashings(
     let validator = unsafeAddr state.validators[index]
     if slashing_penalty_applies(validator[], epoch):
       rewardsAndPenalties[index].slashing_outcome +=
-        validator[].get_slashing_penalty(
-          adjusted_total_slashing_balance, total_balance).int64
+        get_slashing_penalty(
+          typeof(state).kind, validator[], adjusted_total_slashing_balance,
+          total_balance).int64
 
 proc collectEpochRewardsAndPenalties*(
     rewardsAndPenalties: var seq[RewardsAndPenalties],
@@ -274,7 +275,8 @@ proc collectEpochRewardsAndPenalties*(
 proc collectEpochRewardsAndPenalties*(
     rewardsAndPenalties: var seq[RewardsAndPenalties],
     state: var (altair.BeaconState | bellatrix.BeaconState |
-                capella.BeaconState | deneb.BeaconState | electra.BeaconState),
+                capella.BeaconState | deneb.BeaconState | electra.BeaconState |
+                fulu.BeaconState),
     cache: var StateCache, cfg: RuntimeConfig, flags: UpdateFlags) =
   if get_current_epoch(state) == GENESIS_EPOCH:
     return
@@ -398,13 +400,16 @@ func collectFromAttestations(
               forkyState.data, attestation.data, attestation.aggregation_bits,
               attestation.committee_bits, cache):
             rewardsAndPenalties[index].inclusion_delay =
-              some(inclusionDelay.uint64)
+              Opt.some(inclusionDelay.uint64)
         else:
           for index in get_attesting_indices(
               forkyState.data, attestation.data, attestation.aggregation_bits,
               cache):
             rewardsAndPenalties[index].inclusion_delay =
-              some(inclusionDelay.uint64)
+              Opt.some(inclusionDelay.uint64)
+
+from ".."/beacon_chain/validator_bucket_sort import
+  findValidatorIndex, sortValidatorBuckets
 
 proc collectFromDeposits(
     rewardsAndPenalties: var seq[RewardsAndPenalties],
@@ -414,9 +419,12 @@ proc collectFromDeposits(
     cfg: RuntimeConfig) =
   withStateAndBlck(forkedState, forkedBlock):
     for deposit in forkyBlck.message.body.deposits:
-      let pubkey = deposit.data.pubkey
-      let amount = deposit.data.amount
-      var index = findValidatorIndex(forkyState.data, pubkey)
+      let
+        pubkey = deposit.data.pubkey
+        amount = deposit.data.amount
+      var index = findValidatorIndex(
+        forkyState.data.validators.asSeq, sortValidatorBuckets(
+          forkyState.data.validators.asSeq)[], pubkey)
       if index.isNone:
         if pubkey in pubkeyToIndex:
           try:
@@ -426,7 +434,7 @@ proc collectFromDeposits(
       if index.isSome:
         try:
           rewardsAndPenalties[index.get()].deposits += amount
-        except KeyError as e:
+        except KeyError:
           raiseAssert "rewardsAndPenalties lacks expected index " & $index.get()
       elif verify_deposit_signature(cfg, deposit.data):
         pubkeyToIndex[pubkey] = ValidatorIndex(rewardsAndPenalties.len)
@@ -487,7 +495,7 @@ proc collectBlockRewardsAndPenalties*(
 func serializeToCsv*(rp: RewardsAndPenalties,
                      avgInclusionDelay = none(float)): string =
   for name, value in fieldPairs(rp):
-    if value isnot Option:
+    if value isnot Opt:
       result &= $value & ","
   if avgInclusionDelay.isSome:
     result.addFloat(avgInclusionDelay.get)

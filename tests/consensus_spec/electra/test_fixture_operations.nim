@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2024 Status Research & Development GmbH
+# Copyright (c) 2024-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -20,11 +20,11 @@ import
   ../fixtures_utils, ../os_ops,
   ../../helpers/debug_state
 
-from std/sequtils import mapIt, toSeq
+from std/sequtils import anyIt, mapIt, toSeq
 from std/strutils import contains
 from ../../../beacon_chain/spec/beaconstate import
   get_base_reward_per_increment, get_state_exit_queue_info,
-  get_total_active_balance, process_attestation
+  get_total_active_balance, latest_block_root, process_attestation
 
 const
   OpDir                     = SszTestsDir/const_preset/"electra"/"operations"
@@ -121,9 +121,12 @@ suite baseDescription & "Attester Slashing " & preset():
       applyAttesterSlashing, path)
 
 suite baseDescription & "Block Header " & preset():
-  func applyBlockHeader(
+  proc applyBlockHeader(
       preState: var electra.BeaconState, blck: electra.BeaconBlock):
       Result[void, cstring] =
+    if blck.is_execution_block:
+      check blck.body.execution_payload.block_hash ==
+        blck.compute_execution_block_hash()
     var cache: StateCache
     process_block_header(preState, blck, {}, cache)
 
@@ -148,13 +151,18 @@ suite baseDescription & "BLS to execution change " & preset():
       OpBlsToExecutionChangeDir, suiteName, "BLS to execution change", "address_change",
       applyBlsToExecutionChange, path)
 
+from ".."/".."/".."/beacon_chain/validator_bucket_sort import
+  sortValidatorBuckets
+
 suite baseDescription & "Consolidation Request " & preset():
   proc applyConsolidationRequest(
       preState: var electra.BeaconState,
       consolidation_request: ConsolidationRequest): Result[void, cstring] =
     var cache: StateCache
     process_consolidation_request(
-      defaultRuntimeConfig, preState, consolidation_request, cache)
+      defaultRuntimeConfig, preState,
+      sortValidatorBuckets(preState.validators.asSeq)[],
+      consolidation_request, cache)
     ok()
 
   for path in walkTests(OpConsolidationRequestDir):
@@ -162,15 +170,13 @@ suite baseDescription & "Consolidation Request " & preset():
       OpConsolidationRequestDir, suiteName, "Consolidation Request",
       "consolidation_request", applyConsolidationRequest, path)
 
-from ".."/".."/".."/beacon_chain/bloomfilter import constructBloomFilter
-
 suite baseDescription & "Deposit " & preset():
   func applyDeposit(
       preState: var electra.BeaconState, deposit: Deposit):
       Result[void, cstring] =
     process_deposit(
       defaultRuntimeConfig, preState,
-      constructBloomFilter(preState.validators.asSeq)[], deposit, {})
+      sortValidatorBuckets(preState.validators.asSeq)[], deposit, {})
 
   for path in walkTests(OpDepositsDir):
     runTest[Deposit, typeof applyDeposit](
@@ -181,8 +187,7 @@ suite baseDescription & "Deposit Request " & preset():
       preState: var electra.BeaconState, depositRequest: DepositRequest):
       Result[void, cstring] =
     process_deposit_request(
-      defaultRuntimeConfig, preState,
-      constructBloomFilter(preState.validators.asSeq)[], depositRequest, {})
+      defaultRuntimeConfig, preState, depositRequest, {})
 
   for path in walkTests(OpDepositRequestDir):
     runTest[DepositRequest, typeof applyDepositRequest](
@@ -197,8 +202,16 @@ suite baseDescription & "Execution Payload " & preset():
       let payloadValid = os_ops.readFile(
           OpExecutionPayloadDir/"pyspec_tests"/path/"execution.yaml"
         ).contains("execution_valid: true")
+      if payloadValid and body.is_execution_block and
+          not body.execution_payload.transactions.anyIt(it.len == 0):
+        let expectedOk = (path != "incorrect_block_hash")
+        check expectedOk == (body.execution_payload.block_hash ==
+          body.compute_execution_block_hash(
+            preState.latest_block_root(
+              assignClone(preState)[].hash_tree_root())))
       func executePayload(_: electra.ExecutionPayload): bool = payloadValid
-      process_execution_payload(preState, body, executePayload)
+      process_execution_payload(
+        defaultRuntimeConfig, preState, body, executePayload)
 
   for path in walkTests(OpExecutionPayloadDir):
     let applyExecutionPayload = makeApplyExecutionPayloadCb(path)
@@ -212,7 +225,9 @@ suite baseDescription & "Withdrawal Request " & preset():
       Result[void, cstring] =
     var cache: StateCache
     process_withdrawal_request(
-      defaultRuntimeConfig, preState, withdrawalRequest, cache)
+      defaultRuntimeConfig, preState,
+      sortValidatorBuckets(preState.validators.asSeq)[], withdrawalRequest,
+      cache)
     ok()
 
   for path in walkTests(OpWithdrawalRequestDir):
@@ -240,9 +255,9 @@ suite baseDescription & "Sync Aggregate " & preset():
       preState: var electra.BeaconState, syncAggregate: SyncAggregate):
       Result[void, cstring] =
     var cache: StateCache
-    doAssert (? process_sync_aggregate(
+    discard ? process_sync_aggregate(
       preState, syncAggregate, get_total_active_balance(preState, cache),
-      {}, cache)) > 0.Gwei
+      {}, cache)
     ok()
 
   for path in walkTests(OpSyncAggregateDir):

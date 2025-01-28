@@ -11,13 +11,9 @@ import std/strutils
 
 const currentDir = currentSourcePath()[0 .. ^(len("config.nims") + 1)]
 
-if getEnv("NIMBUS_BUILD_SYSTEM") == "yes" and
-   # BEWARE
-   # In Nim 1.6, config files are evaluated with a working directory
-   # matching where the Nim command was invocated. This means that we
-   # must do all file existance checks with full absolute paths:
-   system.fileExists(currentDir & "nimbus-build-system.paths"):
-  include "nimbus-build-system.paths"
+when withDir(thisDir(), system.fileExists("nimbus-build-system.paths")):
+  if getEnv("NIMBUS_BUILD_SYSTEM") == "yes":
+    include "nimbus-build-system.paths"
 
 const nimCachePathOverride {.strdefine.} = ""
 when nimCachePathOverride == "":
@@ -100,14 +96,11 @@ if defined(windows):
 if defined(disableMarchNative):
   if defined(i386) or defined(amd64):
     if defined(macosx):
-      # macOS Big Sur is EOL as of 2023-11
-      # https://support.apple.com/en-us/HT212551
-      # "macOS Monterey is compatible with these computers" of which the
-      # oldest is "Mac Pro (Late 2013)". All have Haswell or newer CPUs.
-      #
-      # This ensures AVX2, AES-NI, PCLMUL, BMI1, and BMI2 instruction set support.
-      switch("passC", "-march=haswell -mtune=generic")
-      switch("passL", "-march=haswell -mtune=generic")
+      # https://support.apple.com/en-us/102861
+      # "macOS Ventura is compatible with these computers" lists current oldest
+      # supported x86 models, all of which have Kaby Lake or newer CPUs.
+      switch("passC", "-march=skylake -mtune=generic")
+      switch("passL", "-march=skylake -mtune=generic")
     else:
       if defined(marchOptimized):
         # https://github.com/status-im/nimbus-eth2/blob/stable/docs/cpu_features.md#bmi2--adx
@@ -120,6 +113,11 @@ elif defined(macosx) and defined(arm64):
   # Apple's Clang can't handle "-march=native" on M1: https://github.com/status-im/nimbus-eth2/issues/2758
   switch("passC", "-mcpu=apple-m1")
   switch("passL", "-mcpu=apple-m1")
+elif defined(riscv64):
+  # riscv64 needs specification of ISA with extensions. 'gc' is widely supported 
+  # and seems to be the minimum extensions needed to build. 
+  switch("passC", "-march=rv64gc")
+  switch("passL", "-march=rv64gc")
 else:
   switch("passC", "-march=native")
   switch("passL", "-march=native")
@@ -183,13 +181,13 @@ if canEnableDebuggingSymbols:
 # `switch("warning[CaseTransition]", "off")` fails with "Error: invalid command line option: '--warning[CaseTransition]'"
 switch("warning", "CaseTransition:off")
 
-# The compiler doth protest too much, methinks, about all these cases where it can't
-# do its (N)RVO pass: https://github.com/nim-lang/RFCs/issues/230
-switch("warning", "ObservableStores:off")
-
 # Too many right now to read compiler output. Warnings are legitimate, but
 # should be fixed out-of-band of `unstable` branch.
 switch("warning", "BareExcept:off")
+
+# Chronicles triggers these
+# vendor/nim-chronicles/chronicles.nim(74, 14) Warning: template 'activeChroniclesScope' is implicitly redefined; this is deprecated, add an explicit .redefine pragma [ImplicitTemplateRedefinition]
+switch("warning", "ImplicitTemplateRedefinition:off")
 
 # Too many of these because of Defect compat in 1.2
 switch("hint", "XCannotRaiseY:off")

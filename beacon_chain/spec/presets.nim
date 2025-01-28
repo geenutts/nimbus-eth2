@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -42,7 +42,7 @@ type
 
     # Transition
     TERMINAL_TOTAL_DIFFICULTY*: UInt256
-    TERMINAL_BLOCK_HASH*: BlockHash
+    TERMINAL_BLOCK_HASH*: Hash32
     TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH*: Epoch  # Not actively used, but part of the spec
 
     # Genesis
@@ -62,6 +62,8 @@ type
     DENEB_FORK_EPOCH*: Epoch
     ELECTRA_FORK_VERSION*: Version
     ELECTRA_FORK_EPOCH*: Epoch
+    FULU_FORK_VERSION*: Version
+    FULU_FORK_EPOCH*: Epoch
 
     # Time parameters
     # TODO SECONDS_PER_SLOT*: uint64
@@ -77,8 +79,6 @@ type
     MIN_PER_EPOCH_CHURN_LIMIT*: uint64
     CHURN_LIMIT_QUOTIENT*: uint64
     MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT*: uint64
-    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA*: uint64
-    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT*: uint64
 
     # Fork choice
     # TODO PROPOSER_SCORE_BOOST*: uint64
@@ -113,6 +113,13 @@ type
     # TODO MAX_REQUEST_BLOB_SIDECARS*: uint64
     MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS*: uint64
     # TODO BLOB_SIDECAR_SUBNET_COUNT*: uint64
+
+    # Electra
+    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA*: uint64
+    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT*: uint64
+    BLOB_SIDECAR_SUBNET_COUNT_ELECTRA*: uint64
+    MAX_BLOBS_PER_BLOCK_ELECTRA*: uint64
+    MAX_REQUEST_BLOB_SIDECARS_ELECTRA*: uint64
 
   PresetFile* = object
     values*: Table[string, string]
@@ -164,7 +171,7 @@ when const_preset == "mainnet":
     TERMINAL_TOTAL_DIFFICULTY:
       u256"115792089237316195423570985008687907853269984665640564039457584007913129638912",
     # By default, don't use these params
-    TERMINAL_BLOCK_HASH: BlockHash.fromHex(
+    TERMINAL_BLOCK_HASH: Hash32.fromHex(
       "0x0000000000000000000000000000000000000000000000000000000000000000"),
 
     # Genesis
@@ -199,6 +206,9 @@ when const_preset == "mainnet":
     # Electra
     ELECTRA_FORK_VERSION: Version [byte 0x05, 0x00, 0x00, 0x00],
     ELECTRA_FORK_EPOCH: FAR_FUTURE_EPOCH,
+    # Fulu
+    FULU_FORK_VERSION: Version [byte 0x06, 0x00, 0x00, 0x00],
+    FULU_FORK_EPOCH: FAR_FUTURE_EPOCH,
 
     # Time parameters
     # ---------------------------------------------------------------
@@ -228,10 +238,6 @@ when const_preset == "mainnet":
     CHURN_LIMIT_QUOTIENT: 65536,
     # [New in Deneb:EIP7514] 2**3 (= 8)
     MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT: 8,
-    # [New in Electra:EIP7251] 2**7 * 10**9 (= 128,000,000,000)
-    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 128000000000'u64,
-    # [New in Electra:EIP7251] 2**8 * 10**9 (= 256,000,000,000)
-    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 256000000000'u64,
 
     # Deposit contract
     # ---------------------------------------------------------------
@@ -278,6 +284,18 @@ when const_preset == "mainnet":
     MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS: 4096,
     # `6`
     # TODO BLOB_SIDECAR_SUBNET_COUNT: 6,
+
+    # Electra
+    # 2**7 * 10**9 (= 128,000,000,000)
+    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 128000000000'u64,
+    # 2**8 * 10**9 (= 256,000,000,000)
+    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 256000000000'u64,
+    # `9`
+    BLOB_SIDECAR_SUBNET_COUNT_ELECTRA: 9,
+    # `uint64(9)`
+    MAX_BLOBS_PER_BLOCK_ELECTRA: 9,
+    # MAX_REQUEST_BLOCKS_DENEB * MAX_BLOBS_PER_BLOCK_ELECTRA
+    MAX_REQUEST_BLOB_SIDECARS_ELECTRA: 1152
   )
 
 elif const_preset == "gnosis":
@@ -348,7 +366,9 @@ elif const_preset == "gnosis":
     # Electra
     ELECTRA_FORK_VERSION: Version [byte 0x05, 0x00, 0x00, 0x64],
     ELECTRA_FORK_EPOCH: FAR_FUTURE_EPOCH,
-
+    # Fulu
+    FULU_FORK_VERSION: Version [byte 0x06, 0x00, 0x00, 0x00],
+    FULU_FORK_EPOCH: FAR_FUTURE_EPOCH,
 
     # Time parameters
     # ---------------------------------------------------------------
@@ -378,10 +398,6 @@ elif const_preset == "gnosis":
     CHURN_LIMIT_QUOTIENT: 4096,
     # [New in Deneb:EIP7514] 2**3 (= 8)
     MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT: 8,
-    # [New in Electra:EIP7251] 2**7 * 10**9 (= 128,000,000,000) (copied from EF mainnet)
-    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 128000000000'u64,
-    # [New in Electra:EIP7251] 2**8 * 10**9 (= 256,000,000,000) (copied from EF mainnet)
-    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 256000000000'u64,
 
     # Deposit contract
     # ---------------------------------------------------------------
@@ -428,6 +444,18 @@ elif const_preset == "gnosis":
     MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS: 16384,
     # `6`
     # TODO BLOB_SIDECAR_SUBNET_COUNT: 6,
+
+    # Electra
+    # 2**7 * 10**9 (= 128,000,000,000)
+    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 128000000000'u64,
+    # 2**8 * 10**9 (= 256,000,000,000)
+    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 256000000000'u64,
+    # `9`
+    BLOB_SIDECAR_SUBNET_COUNT_ELECTRA: 9,
+    # `uint64(9)`
+    MAX_BLOBS_PER_BLOCK_ELECTRA: 9,
+    # MAX_REQUEST_BLOCKS_DENEB * MAX_BLOBS_PER_BLOCK_ELECTRA
+    MAX_REQUEST_BLOB_SIDECARS_ELECTRA: 1152
   )
 
 elif const_preset == "minimal":
@@ -457,7 +485,7 @@ elif const_preset == "minimal":
     TERMINAL_TOTAL_DIFFICULTY:
       u256"115792089237316195423570985008687907853269984665640564039457584007913129638912",
     # By default, don't use these params
-    TERMINAL_BLOCK_HASH: BlockHash.fromHex(
+    TERMINAL_BLOCK_HASH: Hash32.fromHex(
       "0x0000000000000000000000000000000000000000000000000000000000000000"),
 
 
@@ -493,7 +521,9 @@ elif const_preset == "minimal":
     # Electra
     ELECTRA_FORK_VERSION: Version [byte 0x05, 0x00, 0x00, 0x01],
     ELECTRA_FORK_EPOCH: Epoch(uint64.high),
-
+    # Fulu
+    FULU_FORK_VERSION: Version [byte 0x06, 0x00, 0x00, 0x01],
+    FULU_FORK_EPOCH: Epoch(uint64.high),
 
     # Time parameters
     # ---------------------------------------------------------------
@@ -523,10 +553,6 @@ elif const_preset == "minimal":
     CHURN_LIMIT_QUOTIENT: 32,
     # [New in Deneb:EIP7514] [customized]
     MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT: 4,
-    # [New in Electra:EIP7251] 2**6 * 10**9 (= 64,000,000,000)
-    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 64000000000'u64,
-    # [New in Electra:EIP7251] 2**7 * 10**9 (= 128,000,000,000)
-    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 128000000000'u64,
 
 
     # Deposit contract
@@ -575,6 +601,18 @@ elif const_preset == "minimal":
     MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS: 4096,
     # `6`
     # TODO BLOB_SIDECAR_SUBNET_COUNT: 6,
+
+    # Electra
+    # [customized] 2**6 * 10**9 (= 64,000,000,000)
+    MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 64000000000'u64,
+    # [customized] 2**7 * 10**9 (= 128,000,000,000)
+    MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 128000000000'u64,
+    # `9`
+    BLOB_SIDECAR_SUBNET_COUNT_ELECTRA: 9,
+    # `uint64(9)`
+    MAX_BLOBS_PER_BLOCK_ELECTRA: 9,
+    # MAX_REQUEST_BLOCKS_DENEB * MAX_BLOBS_PER_BLOCK_ELECTRA
+    MAX_REQUEST_BLOB_SIDECARS_ELECTRA: 1152,
   )
 
 else:
@@ -643,8 +681,8 @@ template parse(T: type string, input: string): T =
 template parse(T: type Eth1Address, input: string): T =
   Eth1Address.fromHex(input)
 
-template parse(T: type BlockHash, input: string): T =
-  BlockHash.fromHex(input)
+template parse(T: type Hash32, input: string): T =
+  Hash32.fromHex(input)
 
 template parse(T: type UInt256, input: string): T =
   parse(input, UInt256, 10)
@@ -786,8 +824,10 @@ proc readRuntimeConfig*(
   checkCompatibility MAX_REQUEST_BLOCKS_DENEB * MAX_BLOBS_PER_BLOCK,
                      "MAX_REQUEST_BLOB_SIDECARS"
   checkCompatibility BLOB_SIDECAR_SUBNET_COUNT
+  checkCompatibility MAX_BLOBS_PER_BLOCK_ELECTRA
+  checkCompatibility MAX_REQUEST_BLOB_SIDECARS_ELECTRA
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/phase0/fork-choice.md#configuration
+  # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/fork-choice.md#configuration
   # Isn't being used as a preset in the usual way: at any time, there's one correct value
   checkCompatibility PROPOSER_SCORE_BOOST
   checkCompatibility REORG_HEAD_WEIGHT_THRESHOLD

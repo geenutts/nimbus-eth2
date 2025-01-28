@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -16,6 +16,8 @@ import
   web3/[conversions, eth_api_types],
   ./merkle_minimal
 
+from ./engine_api_conversions import asBlockHash, asEth2Digest
+
 export beacon_chain_db, deques, digest, base, forks
 
 logScope:
@@ -30,11 +32,11 @@ declarePublicGauge eth1_finalized_deposits,
 declareGauge eth1_chain_len,
   "The length of the in-memory chain of Eth1 blocks"
 
-template toGaugeValue*(x: Quantity | BlockNumber): int64 =
+template toGaugeValue*(x: Quantity): int64 =
   toGaugeValue(distinctBase x)
 
 type
-  Eth1BlockNumber* = BlockNumber
+  Eth1BlockNumber* = Quantity
   Eth1BlockTimestamp* = uint64
 
   Eth1BlockObj* = object
@@ -67,7 +69,7 @@ type
       ## A non-forkable chain of blocks ending at the block with
       ## ETH1_FOLLOW_DISTANCE offset from the head.
 
-    blocksByHash: Table[BlockHash, Eth1Block]
+    blocksByHash: Table[Hash32, Eth1Block]
 
     headMerkleizer: DepositsMerkleizer
       ## Merkleizer state after applying all `blocks`
@@ -80,17 +82,11 @@ type
     deposits*: seq[Deposit]
     hasMissingDeposits*: bool
 
-func asEth2Digest*(x: BlockHash): Eth2Digest =
-  Eth2Digest(data: array[32, byte](x))
-
-template asBlockHash*(x: Eth2Digest): BlockHash =
-  BlockHash(x.data)
-
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/validator.md#get_eth1_data
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/validator.md#get_eth1_data
 func compute_time_at_slot(genesis_time: uint64, slot: Slot): uint64 =
   genesis_time + slot * SECONDS_PER_SLOT
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/validator.md#get_eth1_data
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/validator.md#get_eth1_data
 func voting_period_start_time(state: ForkedHashedBeaconState): uint64 =
   let eth1_voting_period_start_slot =
     getStateField(state, slot) - getStateField(state, slot) mod
@@ -98,7 +94,7 @@ func voting_period_start_time(state: ForkedHashedBeaconState): uint64 =
   compute_time_at_slot(
     getStateField(state, genesis_time), eth1_voting_period_start_slot)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/validator.md#get_eth1_data
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/validator.md#get_eth1_data
 func is_candidate_block(cfg: RuntimeConfig,
                         blk: Eth1Block,
                         period_start: uint64): bool =
@@ -115,7 +111,7 @@ template findBlock(chain: Eth1Chain, eth1Data: Eth1Data): Eth1Block =
 
 func makeSuccessorWithoutDeposits*(existingBlock: Eth1Block,
                                    successor: BlockObject): Eth1Block =
-  result = Eth1Block(
+  Eth1Block(
     hash: successor.hash.asEth2Digest,
     number: Eth1BlockNumber successor.number,
     timestamp: Eth1BlockTimestamp successor.timestamp)
@@ -278,7 +274,7 @@ proc trackFinalizedState*(chain: var Eth1Chain,
   if result:
     chain.pruneOldBlocks(finalizedStateDepositIndex)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/validator.md#get_eth1_data
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/validator.md#get_eth1_data
 proc getBlockProposalData*(chain: var Eth1Chain,
                            state: ForkedHashedBeaconState,
                            finalizedEth1Data: Eth1Data,
@@ -334,7 +330,19 @@ proc getBlockProposalData*(chain: var Eth1Chain,
   if pendingDepositsCount > 0:
     if hasLatestDeposits:
       let
-        totalDepositsInNewBlock = min(MAX_DEPOSITS, pendingDepositsCount)
+        totalDepositsInNewBlock =
+          withState(state):
+            when consensusFork >= ConsensusFork.Electra:
+              # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.10/specs/electra/validator.md#deposits
+              let eth1_deposit_index_limit = min(
+                forkyState.data.eth1_data.deposit_count,
+                forkyState.data.deposit_requests_start_index)
+              if forkyState.data.eth1_deposit_index < eth1_deposit_index_limit:
+                min(MAX_DEPOSITS, pendingDepositsCount)
+              else:
+                0
+            else:
+              min(MAX_DEPOSITS, pendingDepositsCount)
         postStateDepositIdx = stateDepositIdx + pendingDepositsCount
       var
         deposits = newSeqOfCap[DepositData](totalDepositsInNewBlock)

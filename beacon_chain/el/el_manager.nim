@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -15,12 +15,13 @@ import
   web3, web3/[engine_api, primitives, conversions],
   eth/common/eth_types,
   results,
+  kzg4844/[kzg_abi, kzg],
   stew/[assign2, byteutils, objects],
   # Local modules:
   ../spec/[eth2_merkleization, forks],
   ../networking/network_metadata,
   ".."/beacon_node_status,
-  "."/[eth1_chain, el_conf]
+  "."/[el_conf, engine_api_conversions, eth1_chain]
 
 from std/times import getTime, inSeconds, initTime, `-`
 from ../spec/engine_authentication import getSignedIatToken
@@ -33,12 +34,28 @@ export
 logScope:
   topics = "elman"
 
+const
+  SleepDurations =
+    [100.milliseconds, 200.milliseconds, 500.milliseconds, 1.seconds]
+
 type
+  FixedBytes[N: static int] =  web3.FixedBytes[N]
   PubKeyBytes = DynamicBytes[48, 48]
   WithdrawalCredentialsBytes = DynamicBytes[32, 32]
   SignatureBytes = DynamicBytes[96, 96]
   Int64LeBytes = DynamicBytes[8, 8]
   WithoutTimeout* = distinct int
+
+  DeadlineObject* = object
+    # TODO (cheatfate): This object declaration could be removed when
+    # `Raising()` macro starts to support procedure arguments.
+    future*: Future[void].Raising([CancelledError])
+
+  SomeEnginePayloadWithValue =
+    BellatrixExecutionPayloadWithValue |
+    GetPayloadV2Response |
+    GetPayloadV3Response |
+    GetPayloadV4Response
 
 contract(DepositContract):
   proc deposit(pubkey: PubKeyBytes,
@@ -112,7 +129,7 @@ type
 
     depositContractAddress*: Eth1Address
     depositContractBlockNumber: uint64
-    depositContractBlockHash: BlockHash
+    depositContractBlockHash: Hash32
 
     blocksPerLogsRequest: uint64
       ## This value is used to dynamically adjust the number of
@@ -177,11 +194,11 @@ type
     depositContractSyncStatus: DepositContractSyncStatus
       ## Are we sure that this EL has synced the deposit contract?
 
-    lastPayloadId: Opt[PayloadID]
+    lastPayloadId: Opt[Bytes8]
 
   FullBlockId* = object
     number: Eth1BlockNumber
-    hash: BlockHash
+    hash: Hash32
 
   DataProviderFailure* = object of CatchableError
   CorruptDataProvider* = object of DataProviderFailure
@@ -197,16 +214,6 @@ type
     signature: SignatureBytes,
     merkleTreeIndex: Int64LeBytes,
     j: JsonNode) {.gcsafe, raises: [].}
-
-  BellatrixExecutionPayloadWithValue* = object
-    executionPayload*: ExecutionPayloadV1
-    blockValue*: UInt256
-
-  SomeEnginePayloadWithValue =
-    BellatrixExecutionPayloadWithValue |
-    GetPayloadV2Response |
-    GetPayloadV3Response |
-    GetPayloadV4Response
 
 declareCounter failed_web3_requests,
   "Failed web3 requests"
@@ -233,6 +240,22 @@ declareCounter engine_api_timeouts,
 declareCounter engine_api_last_minute_forkchoice_updates_sent,
   "Number of last minute requests to the forkchoiceUpdated Engine API end-point just before block proposals",
   labels = ["url"]
+
+proc init*(t: typedesc[DeadlineObject], d: Duration): DeadlineObject =
+  DeadlineObject(future: sleepAsync(d))
+
+proc variedSleep*(
+    counter: var int,
+    durations: openArray[Duration]
+): Future[void] {.async: (raises: [CancelledError], raw: true).} =
+  doAssert(len(durations) > 0, "Empty durations array!")
+  let index =
+    if (counter < 0) or (counter > high(durations)):
+      high(durations)
+    else:
+      counter
+  inc(counter)
+  sleepAsync(durations[index])
 
 proc close(connection: ELConnection): Future[void] {.async: (raises: []).} =
   if connection.web3.isSome:
@@ -376,340 +399,6 @@ template eth1ChainBlocks*(m: ELManager): Deque[Eth1Block] =
 #  doAssert SECONDS_PER_ETH1_BLOCK * cfg.ETH1_FOLLOW_DISTANCE < GENESIS_DELAY,
 #             "Invalid configuration: GENESIS_DELAY is set too low"
 
-func asConsensusWithdrawal(w: WithdrawalV1): capella.Withdrawal =
-  capella.Withdrawal(
-    index: w.index.uint64,
-    validator_index: w.validatorIndex.uint64,
-    address: ExecutionAddress(data: w.address.distinctBase),
-    amount: Gwei w.amount)
-
-func asEngineWithdrawal(w: capella.Withdrawal): WithdrawalV1 =
-  WithdrawalV1(
-    index: Quantity(w.index),
-    validatorIndex: Quantity(w.validator_index),
-    address: Address(w.address.data),
-    amount: Quantity(w.amount))
-
-func asConsensusType*(rpcExecutionPayload: ExecutionPayloadV1):
-    bellatrix.ExecutionPayload =
-  template getTransaction(tt: TypedTransaction): bellatrix.Transaction =
-    bellatrix.Transaction.init(tt.distinctBase)
-
-  bellatrix.ExecutionPayload(
-    parent_hash: rpcExecutionPayload.parentHash.asEth2Digest,
-    feeRecipient:
-      ExecutionAddress(data: rpcExecutionPayload.feeRecipient.distinctBase),
-    state_root: rpcExecutionPayload.stateRoot.asEth2Digest,
-    receipts_root: rpcExecutionPayload.receiptsRoot.asEth2Digest,
-    logs_bloom: BloomLogs(data: rpcExecutionPayload.logsBloom.distinctBase),
-    prev_randao: rpcExecutionPayload.prevRandao.asEth2Digest,
-    block_number: rpcExecutionPayload.blockNumber.uint64,
-    gas_limit: rpcExecutionPayload.gasLimit.uint64,
-    gas_used: rpcExecutionPayload.gasUsed.uint64,
-    timestamp: rpcExecutionPayload.timestamp.uint64,
-    extra_data: List[byte, MAX_EXTRA_DATA_BYTES].init(rpcExecutionPayload.extraData.bytes),
-    base_fee_per_gas: rpcExecutionPayload.baseFeePerGas,
-    block_hash: rpcExecutionPayload.blockHash.asEth2Digest,
-    transactions: List[bellatrix.Transaction, MAX_TRANSACTIONS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.transactions, it.getTransaction)))
-
-func asConsensusType*(payloadWithValue: BellatrixExecutionPayloadWithValue):
-    bellatrix.ExecutionPayloadForSigning =
-  bellatrix.ExecutionPayloadForSigning(
-    executionPayload: payloadWithValue.executionPayload.asConsensusType,
-    blockValue: payloadWithValue.blockValue)
-
-template maybeDeref[T](o: Opt[T]): T = o.get
-template maybeDeref[V](v: V): V = v
-
-func asConsensusType*(rpcExecutionPayload: ExecutionPayloadV1OrV2|ExecutionPayloadV2):
-    capella.ExecutionPayload =
-  template getTransaction(tt: TypedTransaction): bellatrix.Transaction =
-    bellatrix.Transaction.init(tt.distinctBase)
-
-  capella.ExecutionPayload(
-    parent_hash: rpcExecutionPayload.parentHash.asEth2Digest,
-    feeRecipient:
-      ExecutionAddress(data: rpcExecutionPayload.feeRecipient.distinctBase),
-    state_root: rpcExecutionPayload.stateRoot.asEth2Digest,
-    receipts_root: rpcExecutionPayload.receiptsRoot.asEth2Digest,
-    logs_bloom: BloomLogs(data: rpcExecutionPayload.logsBloom.distinctBase),
-    prev_randao: rpcExecutionPayload.prevRandao.asEth2Digest,
-    block_number: rpcExecutionPayload.blockNumber.uint64,
-    gas_limit: rpcExecutionPayload.gasLimit.uint64,
-    gas_used: rpcExecutionPayload.gasUsed.uint64,
-    timestamp: rpcExecutionPayload.timestamp.uint64,
-    extra_data: List[byte, MAX_EXTRA_DATA_BYTES].init(rpcExecutionPayload.extraData.bytes),
-    base_fee_per_gas: rpcExecutionPayload.baseFeePerGas,
-    block_hash: rpcExecutionPayload.blockHash.asEth2Digest,
-    transactions: List[bellatrix.Transaction, MAX_TRANSACTIONS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.transactions, it.getTransaction)),
-    withdrawals: List[capella.Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD].init(
-      mapIt(maybeDeref rpcExecutionPayload.withdrawals, it.asConsensusWithdrawal)))
-
-func asConsensusType*(payloadWithValue: engine_api.GetPayloadV2Response):
-    capella.ExecutionPayloadForSigning =
-  capella.ExecutionPayloadForSigning(
-    executionPayload: payloadWithValue.executionPayload.asConsensusType,
-    blockValue: payloadWithValue.blockValue)
-
-func asConsensusType*(rpcExecutionPayload: ExecutionPayloadV3):
-    deneb.ExecutionPayload =
-  template getTransaction(tt: TypedTransaction): bellatrix.Transaction =
-    bellatrix.Transaction.init(tt.distinctBase)
-
-  deneb.ExecutionPayload(
-    parent_hash: rpcExecutionPayload.parentHash.asEth2Digest,
-    feeRecipient:
-      ExecutionAddress(data: rpcExecutionPayload.feeRecipient.distinctBase),
-    state_root: rpcExecutionPayload.stateRoot.asEth2Digest,
-    receipts_root: rpcExecutionPayload.receiptsRoot.asEth2Digest,
-    logs_bloom: BloomLogs(data: rpcExecutionPayload.logsBloom.distinctBase),
-    prev_randao: rpcExecutionPayload.prevRandao.asEth2Digest,
-    block_number: rpcExecutionPayload.blockNumber.uint64,
-    gas_limit: rpcExecutionPayload.gasLimit.uint64,
-    gas_used: rpcExecutionPayload.gasUsed.uint64,
-    timestamp: rpcExecutionPayload.timestamp.uint64,
-    extra_data: List[byte, MAX_EXTRA_DATA_BYTES].init(rpcExecutionPayload.extraData.bytes),
-    base_fee_per_gas: rpcExecutionPayload.baseFeePerGas,
-    block_hash: rpcExecutionPayload.blockHash.asEth2Digest,
-    transactions: List[bellatrix.Transaction, MAX_TRANSACTIONS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.transactions, it.getTransaction)),
-    withdrawals: List[capella.Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.withdrawals, it.asConsensusWithdrawal)),
-    blob_gas_used: rpcExecutionPayload.blobGasUsed.uint64,
-    excess_blob_gas: rpcExecutionPayload.excessBlobGas.uint64)
-
-func asConsensusType*(payload: engine_api.GetPayloadV3Response):
-    deneb.ExecutionPayloadForSigning =
-  deneb.ExecutionPayloadForSigning(
-    executionPayload: payload.executionPayload.asConsensusType,
-    blockValue: payload.blockValue,
-    # TODO
-    # The `mapIt` calls below are necessary only because we use different distinct
-    # types for KZG commitments and Blobs in the `web3` and the `deneb` spec types.
-    # Both are defined as `array[N, byte]` under the hood.
-    blobsBundle: deneb.BlobsBundle(
-      commitments: KzgCommitments.init(
-        payload.blobsBundle.commitments.mapIt(
-          kzg_abi.KzgCommitment(bytes: it.bytes))),
-      proofs: KzgProofs.init(
-        payload.blobsBundle.proofs.mapIt(
-          kzg_abi.KzgProof(bytes: it.bytes))),
-      blobs: Blobs.init(
-        payload.blobsBundle.blobs.mapIt(it.bytes))))
-
-func asConsensusType*(rpcExecutionPayload: ExecutionPayloadV4):
-    electra.ExecutionPayload =
-  template getTransaction(tt: TypedTransaction): bellatrix.Transaction =
-    bellatrix.Transaction.init(tt.distinctBase)
-
-  template getDepositRequest(
-      dr: DepositRequestV1): electra.DepositRequest =
-    electra.DepositRequest(
-      pubkey: ValidatorPubKey(blob: dr.pubkey.distinctBase),
-      withdrawal_credentials: dr.withdrawalCredentials.asEth2Digest,
-      amount: dr.amount.Gwei,
-      signature: ValidatorSig(blob: dr.signature.distinctBase),
-      index: dr.index.uint64)
-
-  template getWithdrawalRequest(
-      wr: WithdrawalRequestV1): electra.WithdrawalRequest =
-    electra.WithdrawalRequest(
-      source_address: ExecutionAddress(data: wr.sourceAddress.distinctBase),
-      validator_pubkey: ValidatorPubKey(blob: wr.validatorPubkey.distinctBase),
-      amount: wr.amount.Gwei)
-
-  template getConsolidationRequest(
-      cr: ConsolidationRequestV1): electra.ConsolidationRequest =
-    electra.ConsolidationRequest(
-      source_address: ExecutionAddress(data: cr.sourceAddress.distinctBase),
-      source_pubkey: ValidatorPubKey(blob: cr.sourcePubkey.distinctBase),
-      target_pubkey: ValidatorPubKey(blob: cr.targetPubkey.distinctBase))
-
-  electra.ExecutionPayload(
-    parent_hash: rpcExecutionPayload.parentHash.asEth2Digest,
-    feeRecipient:
-      ExecutionAddress(data: rpcExecutionPayload.feeRecipient.distinctBase),
-    state_root: rpcExecutionPayload.stateRoot.asEth2Digest,
-    receipts_root: rpcExecutionPayload.receiptsRoot.asEth2Digest,
-    logs_bloom: BloomLogs(data: rpcExecutionPayload.logsBloom.distinctBase),
-    prev_randao: rpcExecutionPayload.prevRandao.asEth2Digest,
-    block_number: rpcExecutionPayload.blockNumber.uint64,
-    gas_limit: rpcExecutionPayload.gasLimit.uint64,
-    gas_used: rpcExecutionPayload.gasUsed.uint64,
-    timestamp: rpcExecutionPayload.timestamp.uint64,
-    extra_data: List[byte, MAX_EXTRA_DATA_BYTES].init(
-      rpcExecutionPayload.extraData.bytes),
-    base_fee_per_gas: rpcExecutionPayload.baseFeePerGas,
-    block_hash: rpcExecutionPayload.blockHash.asEth2Digest,
-    transactions: List[bellatrix.Transaction, MAX_TRANSACTIONS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.transactions, it.getTransaction)),
-    withdrawals: List[capella.Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD].init(
-      mapIt(rpcExecutionPayload.withdrawals, it.asConsensusWithdrawal)),
-    blob_gas_used: rpcExecutionPayload.blobGasUsed.uint64,
-    excess_blob_gas: rpcExecutionPayload.excessBlobGas.uint64,
-    deposit_requests:
-      List[electra.DepositRequest, MAX_DEPOSIT_REQUESTS_PER_PAYLOAD].init(
-        mapIt(rpcExecutionPayload.depositRequests, it.getDepositRequest)),
-    withdrawal_requests: List[electra.WithdrawalRequest,
-      MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD].init(
-        mapIt(rpcExecutionPayload.withdrawalRequests,
-          it.getWithdrawalRequest)),
-    consolidation_requests: List[electra.ConsolidationRequest,
-      Limit MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD].init(
-        mapIt(rpcExecutionPayload.consolidationRequests,
-          it.getConsolidationRequest)))
-
-func asConsensusType*(payload: engine_api.GetPayloadV4Response):
-    electra.ExecutionPayloadForSigning =
-  electra.ExecutionPayloadForSigning(
-    executionPayload: payload.executionPayload.asConsensusType,
-    blockValue: payload.blockValue,
-    # TODO
-    # The `mapIt` calls below are necessary only because we use different distinct
-    # types for KZG commitments and Blobs in the `web3` and the `deneb` spec types.
-    # Both are defined as `array[N, byte]` under the hood.
-    blobsBundle: deneb.BlobsBundle(
-      commitments: KzgCommitments.init(
-        payload.blobsBundle.commitments.mapIt(
-          kzg_abi.KzgCommitment(bytes: it.bytes))),
-      proofs: KzgProofs.init(
-        payload.blobsBundle.proofs.mapIt(
-          kzg_abi.KzgProof(bytes: it.bytes))),
-      blobs: Blobs.init(
-        payload.blobsBundle.blobs.mapIt(it.bytes))))
-
-func asEngineExecutionPayload*(executionPayload: bellatrix.ExecutionPayload):
-    ExecutionPayloadV1 =
-  template getTypedTransaction(tt: bellatrix.Transaction): TypedTransaction =
-    TypedTransaction(tt.distinctBase)
-
-  engine_api.ExecutionPayloadV1(
-    parentHash: executionPayload.parent_hash.asBlockHash,
-    feeRecipient: Address(executionPayload.fee_recipient.data),
-    stateRoot: executionPayload.state_root.asBlockHash,
-    receiptsRoot: executionPayload.receipts_root.asBlockHash,
-    logsBloom:
-      FixedBytes[BYTES_PER_LOGS_BLOOM](executionPayload.logs_bloom.data),
-    prevRandao: executionPayload.prev_randao.asBlockHash,
-    blockNumber: Quantity(executionPayload.block_number),
-    gasLimit: Quantity(executionPayload.gas_limit),
-    gasUsed: Quantity(executionPayload.gas_used),
-    timestamp: Quantity(executionPayload.timestamp),
-    extraData: DynamicBytes[0, MAX_EXTRA_DATA_BYTES](executionPayload.extra_data),
-    baseFeePerGas: executionPayload.base_fee_per_gas,
-    blockHash: executionPayload.block_hash.asBlockHash,
-    transactions: mapIt(executionPayload.transactions, it.getTypedTransaction))
-
-template toEngineWithdrawal(w: capella.Withdrawal): WithdrawalV1 =
-  WithdrawalV1(
-    index: Quantity(w.index),
-    validatorIndex: Quantity(w.validator_index),
-    address: Address(w.address.data),
-    amount: Quantity(w.amount))
-
-func asEngineExecutionPayload*(executionPayload: capella.ExecutionPayload):
-    ExecutionPayloadV2 =
-  template getTypedTransaction(tt: bellatrix.Transaction): TypedTransaction =
-    TypedTransaction(tt.distinctBase)
-  engine_api.ExecutionPayloadV2(
-    parentHash: executionPayload.parent_hash.asBlockHash,
-    feeRecipient: Address(executionPayload.fee_recipient.data),
-    stateRoot: executionPayload.state_root.asBlockHash,
-    receiptsRoot: executionPayload.receipts_root.asBlockHash,
-    logsBloom:
-      FixedBytes[BYTES_PER_LOGS_BLOOM](executionPayload.logs_bloom.data),
-    prevRandao: executionPayload.prev_randao.asBlockHash,
-    blockNumber: Quantity(executionPayload.block_number),
-    gasLimit: Quantity(executionPayload.gas_limit),
-    gasUsed: Quantity(executionPayload.gas_used),
-    timestamp: Quantity(executionPayload.timestamp),
-    extraData: DynamicBytes[0, MAX_EXTRA_DATA_BYTES](executionPayload.extra_data),
-    baseFeePerGas: executionPayload.base_fee_per_gas,
-    blockHash: executionPayload.block_hash.asBlockHash,
-    transactions: mapIt(executionPayload.transactions, it.getTypedTransaction),
-    withdrawals: mapIt(executionPayload.withdrawals, it.toEngineWithdrawal))
-
-func asEngineExecutionPayload*(executionPayload: deneb.ExecutionPayload):
-    ExecutionPayloadV3 =
-  template getTypedTransaction(tt: bellatrix.Transaction): TypedTransaction =
-    TypedTransaction(tt.distinctBase)
-
-  engine_api.ExecutionPayloadV3(
-    parentHash: executionPayload.parent_hash.asBlockHash,
-    feeRecipient: Address(executionPayload.fee_recipient.data),
-    stateRoot: executionPayload.state_root.asBlockHash,
-    receiptsRoot: executionPayload.receipts_root.asBlockHash,
-    logsBloom:
-      FixedBytes[BYTES_PER_LOGS_BLOOM](executionPayload.logs_bloom.data),
-    prevRandao: executionPayload.prev_randao.asBlockHash,
-    blockNumber: Quantity(executionPayload.block_number),
-    gasLimit: Quantity(executionPayload.gas_limit),
-    gasUsed: Quantity(executionPayload.gas_used),
-    timestamp: Quantity(executionPayload.timestamp),
-    extraData: DynamicBytes[0, MAX_EXTRA_DATA_BYTES](executionPayload.extra_data),
-    baseFeePerGas: executionPayload.base_fee_per_gas,
-    blockHash: executionPayload.block_hash.asBlockHash,
-    transactions: mapIt(executionPayload.transactions, it.getTypedTransaction),
-    withdrawals: mapIt(executionPayload.withdrawals, it.asEngineWithdrawal),
-    blobGasUsed: Quantity(executionPayload.blob_gas_used),
-    excessBlobGas: Quantity(executionPayload.excess_blob_gas))
-
-func asEngineExecutionPayload*(executionPayload: electra.ExecutionPayload):
-    ExecutionPayloadV4 =
-  template getTypedTransaction(tt: bellatrix.Transaction): TypedTransaction =
-    TypedTransaction(tt.distinctBase)
-
-  template getDepositRequest(
-      dr: electra.DepositRequest): DepositRequestV1 =
-    DepositRequestV1(
-      pubkey: FixedBytes[RawPubKeySize](dr.pubkey.blob),
-      withdrawalCredentials: FixedBytes[32](dr.withdrawal_credentials.data),
-      amount: dr.amount.Quantity,
-      signature: FixedBytes[RawSigSize](dr.signature.blob),
-      index: dr.index.Quantity)
-
-  template getWithdrawalRequest(
-      wr: electra.WithdrawalRequest): WithdrawalRequestV1 =
-    WithdrawalRequestV1(
-      sourceAddress: Address(wr.source_address.data),
-      validatorPubkey: FixedBytes[RawPubKeySize](wr.validator_pubkey.blob),
-      amount: wr.amount.Quantity)
-
-  template getConsolidationRequest(
-      cr: electra.ConsolidationRequest): ConsolidationRequestV1 =
-    ConsolidationRequestV1(
-      sourceAddress: Address(cr.source_address.data),
-      sourcePubkey: FixedBytes[RawPubKeySize](cr.source_pubkey.blob),
-      targetPubkey: FixedBytes[RawPubKeySize](cr.target_pubkey.blob))
-
-  engine_api.ExecutionPayloadV4(
-    parentHash: executionPayload.parent_hash.asBlockHash,
-    feeRecipient: Address(executionPayload.fee_recipient.data),
-    stateRoot: executionPayload.state_root.asBlockHash,
-    receiptsRoot: executionPayload.receipts_root.asBlockHash,
-    logsBloom:
-      FixedBytes[BYTES_PER_LOGS_BLOOM](executionPayload.logs_bloom.data),
-    prevRandao: executionPayload.prev_randao.asBlockHash,
-    blockNumber: Quantity(executionPayload.block_number),
-    gasLimit: Quantity(executionPayload.gas_limit),
-    gasUsed: Quantity(executionPayload.gas_used),
-    timestamp: Quantity(executionPayload.timestamp),
-    extraData: DynamicBytes[0, MAX_EXTRA_DATA_BYTES](executionPayload.extra_data),
-    baseFeePerGas: executionPayload.base_fee_per_gas,
-    blockHash: executionPayload.block_hash.asBlockHash,
-    transactions: mapIt(executionPayload.transactions, it.getTypedTransaction),
-    withdrawals: mapIt(executionPayload.withdrawals, it.asEngineWithdrawal),
-    blobGasUsed: Quantity(executionPayload.blob_gas_used),
-    excessBlobGas: Quantity(executionPayload.excess_blob_gas),
-    depositRequests: mapIt(
-      executionPayload.deposit_requests, it.getDepositRequest),
-    withdrawalRequests: mapIt(
-      executionPayload.withdrawal_requests, it.getWithdrawalRequest),
-    consolidationRequests: mapIt(
-      executionPayload.consolidation_requests, it.getConsolidationRequest))
-
 func isConnected(connection: ELConnection): bool =
   connection.web3.isSome
 
@@ -768,7 +457,7 @@ proc connectedRpcClient(connection: ELConnection): Future[RpcClient] {.
 
 proc getBlockByHash(
     rpcClient: RpcClient,
-    hash: BlockHash
+    hash: Hash32
 ): Future[BlockObject] {.async: (raises: [CatchableError]).} =
   await rpcClient.eth_getBlockByHash(hash, false)
 
@@ -796,7 +485,7 @@ func areSameAs(expectedParams: Option[NextExpectedPayloadParams],
     expectedParams.get.safeBlockHash == latestSafe and
     expectedParams.get.finalizedBlockHash == latestFinalized and
     expectedParams.get.payloadAttributes.timestamp.uint64 == timestamp and
-    expectedParams.get.payloadAttributes.prevRandao.bytes == randomData.data and
+    expectedParams.get.payloadAttributes.prevRandao.data == randomData.data and
     expectedParams.get.payloadAttributes.suggestedFeeRecipient == feeRecipient and
     expectedParams.get.payloadAttributes.withdrawals == withdrawals
 
@@ -869,7 +558,7 @@ proc getPayloadFromSingleEL(
             prevRandao: FixedBytes[32] randomData.data,
             suggestedFeeRecipient: suggestedFeeRecipient,
             withdrawals: withdrawals,
-            parentBeaconBlockRoot: consensusHead.asBlockHash))
+            parentBeaconBlockRoot: consensusHead.to(Hash32)))
       else:
         static: doAssert false
 
@@ -906,6 +595,9 @@ template EngineApiResponseType*(T: type deneb.ExecutionPayloadForSigning): type 
   engine_api.GetPayloadV3Response
 
 template EngineApiResponseType*(T: type electra.ExecutionPayloadForSigning): type =
+  engine_api.GetPayloadV4Response
+
+template EngineApiResponseType*(T: type fulu.ExecutionPayloadForSigning): type =
   engine_api.GetPayloadV4Response
 
 template toEngineWithdrawals*(withdrawals: seq[capella.Withdrawal]): seq[WithdrawalV1] =
@@ -1030,8 +722,12 @@ proc getPayload*(
       requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
     await noCancel allFutures(pending)
 
-    if bestPayloadIdx.isSome():
-      return ok(requests[bestPayloadIdx.get()].value().asConsensusType)
+    when PayloadType.kind == ConsensusFork.Fulu:
+      if bestPayloadIdx.isSome():
+        return ok(requests[bestPayloadIdx.get()].value().asConsensusTypeFulu)
+    else:
+      if bestPayloadIdx.isSome():
+        return ok(requests[bestPayloadIdx.get()].value().asConsensusType)
 
     if timeoutExceeded:
       break
@@ -1040,7 +736,7 @@ proc getPayload*(
 
 proc waitELToSyncDeposits(
     connection: ELConnection,
-    minimalRequiredBlock: BlockHash
+    minimalRequiredBlock: Hash32
 ) {.async: (raises: [CancelledError]).} =
   var rpcClient: RpcClient = nil
 
@@ -1086,7 +782,7 @@ proc waitELToSyncDeposits(
 func networkHasDepositContract(m: ELManager): bool =
   not m.cfg.DEPOSIT_CONTRACT_ADDRESS.isDefaultValue
 
-func mostRecentKnownBlock(m: ELManager): BlockHash =
+func mostRecentKnownBlock(m: ELManager): Hash32 =
   if m.eth1Chain.finalizedDepositsMerkleizer.getChunkCount() > 0:
     m.eth1Chain.finalizedBlockHash.asBlockHash
   else:
@@ -1152,17 +848,19 @@ proc sendNewPayloadToSingleEL(
 ): Future[PayloadStatusV1] {.async: (raises: [CatchableError]).} =
   let rpcClient = await connection.connectedRpcClient()
   await rpcClient.engine_newPayloadV3(
-    payload, versioned_hashes, parent_beacon_block_root)
+    payload, versioned_hashes, Hash32 parent_beacon_block_root)
 
 proc sendNewPayloadToSingleEL(
     connection: ELConnection,
-    payload: engine_api.ExecutionPayloadV4,
+    payload: engine_api.ExecutionPayloadV3,
     versioned_hashes: seq[engine_api.VersionedHash],
-    parent_beacon_block_root: FixedBytes[32]
+    parent_beacon_block_root: FixedBytes[32],
+    executionRequests: seq[seq[byte]]
 ): Future[PayloadStatusV1] {.async: (raises: [CatchableError]).} =
   let rpcClient = await connection.connectedRpcClient()
   await rpcClient.engine_newPayloadV4(
-    payload, versioned_hashes, parent_beacon_block_root)
+    payload, versioned_hashes, Hash32 parent_beacon_block_root,
+    executionRequests)
 
 type
   StatusRelation = enum
@@ -1220,11 +918,13 @@ func compareStatuses(
 type
   ELConsensusViolationDetector = object
     selectedResponse: Opt[int]
+    selectedStatus: Opt[PayloadExecutionStatus]
     disagreementAlreadyDetected: bool
 
 func init(T: type ELConsensusViolationDetector): T =
   ELConsensusViolationDetector(
     selectedResponse: Opt.none(int),
+    selectedStatus: Opt.none(PayloadExecutionStatus),
     disagreementAlreadyDetected: false
   )
 
@@ -1241,11 +941,13 @@ proc processResponse(
   let status = requests[idx].value().status
   if d.selectedResponse.isNone:
     d.selectedResponse = Opt.some(idx)
+    d.selectedStatus = Opt.some(status)
   elif not d.disagreementAlreadyDetected:
     let prevStatus = requests[d.selectedResponse.get].value().status
     case compareStatuses(status, prevStatus)
     of newStatusIsPreferable:
       d.selectedResponse = Opt.some(idx)
+      d.selectedStatus = Opt.some(status)
     of oldStatusIsOk:
       discard
     of disagreement:
@@ -1256,6 +958,21 @@ proc processResponse(
             status1 = prevStatus,
             url2 = connections[idx].engineUrl.url,
             status2 = status
+
+proc couldBeBetter(d: ELConsensusViolationDetector): bool =
+  const
+    SyncingOrAccepted = {
+      PayloadExecutionStatus.syncing,
+      PayloadExecutionStatus.accepted
+    }
+  if d.disagreementAlreadyDetected:
+    return false
+  if d.selectedStatus.isNone():
+    return true
+  if d.selectedStatus.get() in SyncingOrAccepted:
+    true
+  else:
+    false
 
 proc lazyWait(futures: seq[FutureBase]) {.async: (raises: []).} =
   block:
@@ -1275,22 +992,53 @@ proc lazyWait(futures: seq[FutureBase]) {.async: (raises: []).} =
 
 proc sendNewPayload*(
     m: ELManager,
-    blck: SomeForkyBeaconBlock
+    blck: SomeForkyBeaconBlock,
+    deadlineObj: DeadlineObject,
+    maxRetriesCount: int
 ): Future[PayloadExecutionStatus] {.async: (raises: [CancelledError]).} =
+  doAssert maxRetriesCount > 0
+
   let
     startTime = Moment.now()
-    deadline = sleepAsync(NEWPAYLOAD_TIMEOUT)
-    payload = blck.body.execution_payload.asEngineExecutionPayload
+    deadline = deadlineObj.future
+    payload = blck.body.asEngineExecutionPayload
   var
     responseProcessor = ELConsensusViolationDetector.init()
+    sleepCounter = 0
+    retriesCount = 0
 
   while true:
     block mainLoop:
       let
         requests = m.elConnections.mapIt:
           let req =
-            when payload is engine_api.ExecutionPayloadV3 or
-                 payload is engine_api.ExecutionPayloadV4:
+            when typeof(blck).kind >= ConsensusFork.Electra:
+              # https://github.com/ethereum/execution-apis/blob/4140e528360fea53c34a766d86a000c6c039100e/src/engine/prague.md#engine_newpayloadv4
+              let
+                versioned_hashes = mapIt(
+                  blck.body.blob_kzg_commitments,
+                  engine_api.VersionedHash(kzg_commitment_to_versioned_hash(it)))
+                # https://github.com/ethereum/execution-apis/blob/7c9772f95c2472ccfc6f6128dc2e1b568284a2da/src/engine/prague.md#request
+                # "Each list element is a `requests` byte array as defined by
+                # EIP-7685. The first byte of each element is the `request_type`
+                # and the remaining bytes are the `request_data`. Elements of
+                # the list MUST be ordered by `request_type` in ascending order.
+                # Elements with empty `request_data` MUST be excluded from the
+                # list."
+                execution_requests = block:
+                  var requests: seq[seq[byte]]
+                  for request_type, request_data in
+                      [SSZ.encode(blck.body.execution_requests.deposits),
+                       SSZ.encode(blck.body.execution_requests.withdrawals),
+                       SSZ.encode(blck.body.execution_requests.consolidations)]:
+                    if request_data.len > 0:
+                      requests.add @[request_type.byte] & request_data
+                  requests
+
+              sendNewPayloadToSingleEL(
+                it, payload, versioned_hashes,
+                FixedBytes[32] blck.parent_root.data, execution_requests)
+            elif typeof(blck).kind == ConsensusFork.Deneb:
               # https://github.com/ethereum/consensus-specs/blob/v1.4.0-alpha.1/specs/deneb/beacon-chain.md#process_execution_payload
               # Verify the execution payload is valid
               # [Modified in Deneb] Pass `versioned_hashes` to Execution Engine
@@ -1300,8 +1048,7 @@ proc sendNewPayload*(
               sendNewPayloadToSingleEL(
                 it, payload, versioned_hashes,
                 FixedBytes[32] blck.parent_root.data)
-            elif payload is engine_api.ExecutionPayloadV1 or
-                 payload is engine_api.ExecutionPayloadV2:
+            elif typeof(blck).kind in [ConsensusFork.Bellatrix, ConsensusFork.Capella]:
               sendNewPayloadToSingleEL(it, payload)
             else:
               static: doAssert false
@@ -1342,11 +1089,14 @@ proc sendNewPayload*(
           await noCancel allFutures(pending)
           return PayloadExecutionStatus.invalid
         elif responseProcessor.selectedResponse.isSome():
-          # We spawn task which will wait for all other responses which are
-          # still pending, after 30.seconds all pending requests will be
-          # cancelled.
-          asyncSpawn lazyWait(pendingRequests.mapIt(FutureBase(it)))
-          return requests[responseProcessor.selectedResponse.get].value().status
+          if (len(pendingRequests) == 0) or
+             not(responseProcessor.couldBeBetter()):
+            # We spawn task which will wait for all other responses which are
+            # still pending, after 30.seconds all pending requests will be
+            # cancelled.
+            asyncSpawn lazyWait(pendingRequests.mapIt(FutureBase(it)))
+            return
+              requests[responseProcessor.selectedResponse.get].value().status
 
         if timeoutExceeded:
           # Timeout exceeded, cancelling all pending requests.
@@ -1357,9 +1107,22 @@ proc sendNewPayload*(
           return PayloadExecutionStatus.syncing
 
         if len(pendingRequests) == 0:
-          # All requests failed, we will continue our attempts until deadline
-          # is not finished.
+          # All requests failed.
+          inc(retriesCount)
+          if retriesCount == maxRetriesCount:
+            return PayloadExecutionStatus.syncing
+
+          # To avoid continous spam of requests when EL node is offline we
+          # going to sleep until next attempt.
+          await variedSleep(sleepCounter, SleepDurations)
           break mainLoop
+
+proc sendNewPayload*(
+    m: ELManager,
+    blck: SomeForkyBeaconBlock
+): Future[PayloadExecutionStatus] {.
+    async: (raises: [CancelledError], raw: true).} =
+  sendNewPayload(m, blck, DeadlineObject.init(NEWPAYLOAD_TIMEOUT), high(int))
 
 proc forkchoiceUpdatedForSingleEL(
     connection: ELConnection,
@@ -1388,11 +1151,14 @@ proc forkchoiceUpdated*(
     headBlockHash, safeBlockHash, finalizedBlockHash: Eth2Digest,
     payloadAttributes: Opt[PayloadAttributesV1] |
                        Opt[PayloadAttributesV2] |
-                       Opt[PayloadAttributesV3]
-): Future[(PayloadExecutionStatus, Opt[BlockHash])] {.
+                       Opt[PayloadAttributesV3],
+    deadlineObj: DeadlineObject,
+    maxRetriesCount: int
+): Future[(PayloadExecutionStatus, Opt[Hash32])] {.
    async: (raises: [CancelledError]).} =
 
   doAssert not headBlockHash.isZero
+  doAssert maxRetriesCount > 0
 
   # Allow finalizedBlockHash to be 0 to avoid sync deadlocks.
   #
@@ -1401,12 +1167,12 @@ proc forkchoiceUpdated*(
   # block hash provided by this event is stubbed with
   # `0x0000000000000000000000000000000000000000000000000000000000000000`."
   # and
-  # https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/bellatrix/validator.md#executionpayload
+  # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/bellatrix/validator.md#executionpayload
   # notes "`finalized_block_hash` is the hash of the latest finalized execution
   # payload (`Hash32()` if none yet finalized)"
 
   if m.elConnections.len == 0:
-    return (PayloadExecutionStatus.syncing, Opt.none BlockHash)
+    return (PayloadExecutionStatus.syncing, Opt.none Hash32)
 
   when payloadAttributes is Opt[PayloadAttributesV3]:
     template payloadAttributesV3(): auto =
@@ -1423,7 +1189,7 @@ proc forkchoiceUpdated*(
           prevRandao: payloadAttributes.get.prevRandao,
           suggestedFeeRecipient: payloadAttributes.get.suggestedFeeRecipient,
           withdrawals: payloadAttributes.get.withdrawals,
-          parentBeaconBlockRoot: static(default(FixedBytes[32])))
+          parentBeaconBlockRoot: default(Hash32))
       else:
         # As timestamp and prevRandao are both 0, won't false-positive match
         (static(default(PayloadAttributesV3)))
@@ -1435,7 +1201,7 @@ proc forkchoiceUpdated*(
           prevRandao: payloadAttributes.get.prevRandao,
           suggestedFeeRecipient: payloadAttributes.get.suggestedFeeRecipient,
           withdrawals: @[],
-          parentBeaconBlockRoot: static(default(FixedBytes[32])))
+          parentBeaconBlockRoot: default(Hash32))
       else:
         # As timestamp and prevRandao are both 0, won't false-positive match
         (static(default(PayloadAttributesV3)))
@@ -1448,9 +1214,12 @@ proc forkchoiceUpdated*(
       safeBlockHash: safeBlockHash.asBlockHash,
       finalizedBlockHash: finalizedBlockHash.asBlockHash)
     startTime = Moment.now
-    deadline = sleepAsync(FORKCHOICEUPDATED_TIMEOUT)
+    deadline = deadlineObj.future
+
   var
     responseProcessor = ELConsensusViolationDetector.init()
+    sleepCounter = 0
+    retriesCount = 0
 
   while true:
     block mainLoop:
@@ -1512,7 +1281,7 @@ proc forkchoiceUpdated*(
             pendingRequests.filterIt(not(it.finished())).
               mapIt(it.cancelAndWait())
           await noCancel allFutures(pending)
-          return (PayloadExecutionStatus.invalid, Opt.none BlockHash)
+          return (PayloadExecutionStatus.invalid, Opt.none Hash32)
         elif responseProcessor.selectedResponse.isSome:
           # We spawn task which will wait for all other responses which are
           # still pending, after 30.seconds all pending requests will be
@@ -1527,12 +1296,32 @@ proc forkchoiceUpdated*(
             pendingRequests.filterIt(not(it.finished())).
               mapIt(it.cancelAndWait())
           await noCancel allFutures(pending)
-          return (PayloadExecutionStatus.syncing, Opt.none BlockHash)
+          return (PayloadExecutionStatus.syncing, Opt.none Hash32)
 
         if len(pendingRequests) == 0:
           # All requests failed, we will continue our attempts until deadline
           # is not finished.
+          inc(retriesCount)
+          if retriesCount == maxRetriesCount:
+            return (PayloadExecutionStatus.syncing, Opt.none Hash32)
+
+          # To avoid continous spam of requests when EL node is offline we
+          # going to sleep until next attempt.
+          await variedSleep(sleepCounter, SleepDurations)
           break mainLoop
+
+proc forkchoiceUpdated*(
+    m: ELManager,
+    headBlockHash, safeBlockHash, finalizedBlockHash: Eth2Digest,
+    payloadAttributes: Opt[PayloadAttributesV1] |
+                       Opt[PayloadAttributesV2] |
+                       Opt[PayloadAttributesV3]
+): Future[(PayloadExecutionStatus, Opt[Hash32])] {.
+    async: (raises: [CancelledError], raw: true).} =
+  forkchoiceUpdated(
+    m, headBlockHash, safeBlockHash, finalizedBlockHash,
+    payloadAttributes, DeadlineObject.init(FORKCHOICEUPDATED_TIMEOUT),
+    high(int))
 
 # TODO can't be defined within exchangeConfigWithSingleEL
 func `==`(x, y: Quantity): bool {.borrow.}
@@ -1643,7 +1432,7 @@ func depositEventsToBlocks(
     let
       logEvent = JrpcConv.decode(logEventData.string, LogObject)
       blockNumber = Eth1BlockNumber readJsonField(logEvent, blockNumber, Quantity)
-      blockHash = readJsonField(logEvent, blockHash, BlockHash)
+      blockHash = readJsonField(logEvent, blockHash, Hash32)
 
     if lastEth1Block == nil or lastEth1Block.number != blockNumber:
       lastEth1Block = Eth1Block(

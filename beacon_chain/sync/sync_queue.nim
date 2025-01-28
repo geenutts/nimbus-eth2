@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -139,19 +139,20 @@ proc cmp*[T](a, b: SyncRequest[T]): int =
   cmp(uint64(a.slot), uint64(b.slot))
 
 proc checkResponse*[T](req: SyncRequest[T],
-                       data: openArray[Slot]): bool =
+                       data: openArray[Slot]): Result[void, cstring] =
   if len(data) == 0:
     # Impossible to verify empty response.
-    return true
+    return ok()
 
-  if uint64(len(data)) > req.count:
+  if lenu64(data) > req.count:
     # Number of blocks in response should be less or equal to number of
     # requested blocks.
-    return false
+    return err("Too many blocks received")
 
-  var slot = req.slot
-  var rindex = 0'u64
-  var dindex = 0
+  var
+    slot = req.slot
+    rindex = 0'u64
+    dindex = 0
 
   while (rindex < req.count) and (dindex < len(data)):
     if slot < data[dindex]:
@@ -159,14 +160,45 @@ proc checkResponse*[T](req: SyncRequest[T],
     elif slot == data[dindex]:
       inc(dindex)
     else:
-      return false
+      return err("Incorrect order or duplicate blocks found")
     slot += 1'u64
     rindex += 1'u64
 
-  if dindex == len(data):
-    return true
-  else:
-    return false
+  if dindex != len(data):
+    return err("Some of the blocks are outside the requested range")
+
+  ok()
+
+proc checkBlobsResponse*[T](req: SyncRequest[T],
+                            data: openArray[Slot]): Result[void, cstring] =
+  if len(data) == 0:
+    # Impossible to verify empty response.
+    return ok()
+
+  static: doAssert MAX_BLOBS_PER_BLOCK_ELECTRA >= MAX_BLOBS_PER_BLOCK
+
+  if lenu64(data) > (req.count * MAX_BLOBS_PER_BLOCK_ELECTRA):
+    # Number of blobs in response should be less or equal to number of
+    # requested (blocks * MAX_BLOBS_PER_BLOCK_ELECTRA).
+    return err("Too many blobs received")
+
+  var
+    pslot = data[0]
+    counter = 0'u64
+  for slot in data:
+    if (slot < req.slot) or (slot >= req.slot + req.count):
+      return err("Some of the blobs are not in requested range")
+    if slot < pslot:
+      return err("Incorrect order")
+    if slot == pslot:
+      inc(counter)
+      if counter > MAX_BLOBS_PER_BLOCK_ELECTRA:
+        return err("Number of blobs in the block exceeds the limit")
+    else:
+      counter = 1'u64
+    pslot = slot
+
+  ok()
 
 proc init[T](t1: typedesc[SyncRequest], kind: SyncQueueKind, start: Slot,
              finish: Slot, t2: typedesc[T]): SyncRequest[T] =

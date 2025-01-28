@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -114,7 +114,8 @@ suite baseDescription & "Block Header " & preset():
     runTest[altair.BeaconBlock, typeof applyBlockHeader](
       OpBlockHeaderDir, suiteName, "Block Header", "block", applyBlockHeader, path)
 
-from ".."/".."/".."/beacon_chain/bloomfilter import constructBloomFilter
+from ".."/".."/".."/beacon_chain/validator_bucket_sort import
+  sortValidatorBuckets
 
 suite baseDescription & "Deposit " & preset():
   proc applyDeposit(
@@ -122,7 +123,7 @@ suite baseDescription & "Deposit " & preset():
       Result[void, cstring] =
     process_deposit(
       defaultRuntimeConfig, preState,
-      constructBloomFilter(preState.validators.asSeq)[], deposit, {})
+      sortValidatorBuckets(preState.validators.asSeq)[], deposit, {})
 
   for path in walkTests(OpDepositsDir):
     runTest[Deposit, typeof applyDeposit](
@@ -148,9 +149,9 @@ suite baseDescription & "Sync Aggregate " & preset():
       preState: var altair.BeaconState, syncAggregate: SyncAggregate):
       Result[void, cstring] =
     var cache: StateCache
-    doAssert (? process_sync_aggregate(
+    discard ? process_sync_aggregate(
       preState, syncAggregate, get_total_active_balance(preState, cache),
-      {}, cache)) > 0.Gwei
+      {}, cache)
     ok()
 
   for path in walkTests(OpSyncAggregateDir):

@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -22,10 +22,12 @@ import
   ./el/el_manager,
   ./consensus_object_pools/[
     blockchain_dag, blob_quarantine, block_quarantine, consensus_manager,
-    attestation_pool, sync_committee_msg_pool, validator_change_pool],
+    data_column_quarantine, attestation_pool, sync_committee_msg_pool, validator_change_pool,
+    blockchain_list],
   ./spec/datatypes/[base, altair],
   ./spec/eth2_apis/dynamic_fee_recipients,
-  ./sync/[sync_manager, request_manager],
+  ./spec/signatures_batch,
+  ./sync/[sync_manager, request_manager, sync_types],
   ./validators/[
     action_tracker, message_router, validator_monitor, validator_pool,
     keystore_management],
@@ -38,13 +40,14 @@ export
   eth2_network, el_manager, request_manager, sync_manager,
   eth2_processor, optimistic_processor, blockchain_dag, block_quarantine,
   base, message_router, validator_monitor, validator_pool,
-  consensus_manager, dynamic_fee_recipients
+  consensus_manager, dynamic_fee_recipients, sync_types
 
 type
   EventBus* = object
     headQueue*: AsyncEventQueue[HeadChangeInfoObject]
     blocksQueue*: AsyncEventQueue[EventBeaconBlockObject]
     attestQueue*: AsyncEventQueue[phase0.Attestation]
+    singleAttestQueue*: AsyncEventQueue[SingleAttestation]
     exitQueue*: AsyncEventQueue[SignedVoluntaryExit]
     blsToExecQueue*: AsyncEventQueue[SignedBLSToExecutionChange]
     propSlashQueue*: AsyncEventQueue[ProposerSlashing]
@@ -57,6 +60,7 @@ type
       RestVersioned[ForkedLightClientFinalityUpdate]]
     optUpdateQueue*: AsyncEventQueue[
       RestVersioned[ForkedLightClientOptimisticUpdate]]
+    optFinHeaderUpdateQueue*: AsyncEventQueue[ForkedLightClientHeader]
 
   BeaconNode* = ref object
     nickname*: string
@@ -67,12 +71,14 @@ type
     config*: BeaconNodeConf
     attachedValidators*: ref ValidatorPool
     optimisticProcessor*: OptimisticProcessor
-    optimisticFcuFut*: Future[(PayloadExecutionStatus, Opt[BlockHash])]
+    optimisticFcuFut*: Future[(PayloadExecutionStatus, Opt[Hash32])]
       .Raising([CancelledError])
     lightClient*: LightClient
     dag*: ChainDAGRef
+    list*: ChainListRef
     quarantine*: ref Quarantine
     blobQuarantine*: ref BlobQuarantine
+    dataColumnQuarantine*: ref DataColumnQuarantine
     attestationPool*: ref AttestationPool
     syncCommitteeMsgPool*: ref SyncCommitteeMsgPool
     lightClientPool*: ref LightClientPool
@@ -87,8 +93,11 @@ type
     requestManager*: RequestManager
     syncManager*: SyncManager[Peer, PeerId]
     backfiller*: SyncManager[Peer, PeerId]
+    untrustedManager*: SyncManager[Peer, PeerId]
+    syncOverseer*: SyncOverseerRef
     genesisSnapshotContent*: string
     processor*: ref Eth2Processor
+    batchVerifier*: ref BatchVerifier
     blockProcessor*: ref BlockProcessor
     consensusManager*: ref ConsensusManager
     attachedValidatorBalanceTotal*: Gwei
@@ -151,8 +160,11 @@ proc getPayloadBuilderClient*(
 
   if payloadBuilderAddress.isNone:
     return err "Payload builder disabled"
-  let res = RestClientRef.new(payloadBuilderAddress.get)
-  if res.isOk and res.get.isNil:
-    err "Got nil payload builder REST client reference"
-  else:
-    res
+
+  let
+    flags = {RestClientFlag.CommaSeparatedArray,
+             RestClientFlag.ResolveAlways}
+    socketFlags = {SocketFlags.TcpNoDelay}
+
+  RestClientRef.new(payloadBuilderAddress.get, flags = flags,
+                    socketFlags = socketFlags)

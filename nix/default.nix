@@ -5,7 +5,7 @@
   # Options: nimbus_light_client, nimbus_validator_client, nimbus_signing_node, all
   targets ? ["nimbus_beacon_node"],
   # Options: 0,1,2
-  verbosity ? 0,
+  verbosity ? 1,
   # Perform 2-stage bootstrap instead of 3-stage to save time.
   quickAndDirty ? true,
   # These are the only platforms tested in CI and considered stable.
@@ -15,6 +15,10 @@
     "x86_64-windows"
   ],
 }:
+
+# The 'or' is to handle src fallback to ../. which lack submodules attribue.
+assert pkgs.lib.assertMsg ((src.submodules or true) == true)
+  "Unable to build without submodules. Append '?submodules=1#' to the URI.";
 
 let
   inherit (pkgs) stdenv lib writeScriptBin callPackage;
@@ -62,7 +66,6 @@ in stdenv.mkDerivation rec {
     cp -r ${callPackage ./checksums.nix {}} dist/checksums
     cp -r ${callPackage ./csources.nix {}}  csources_v2
     chmod 777 -R dist/nimble csources_v2
-    sed -i 's/isGitRepo(destDir)/false/' tools/deps.nim
     popd
   '';
 

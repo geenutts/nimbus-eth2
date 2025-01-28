@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2020-2024 Status Research & Development GmbH
+# Copyright (c) 2020-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -8,7 +8,7 @@
 {.push raises: [].}
 
 import
-  std/[os, stats, tables],
+  std/tables,
   snappy,
   chronicles, confutils, stew/[byteutils, io2], eth/db/kvstore_sqlite3,
   ../beacon_chain/networking/network_metadata,
@@ -20,6 +20,9 @@ import
   ../beacon_chain/sszdump,
   ../research/simutils,
   ./era, ./ncli_common, ./validator_db_aggregator
+
+from std/os import createDir, dirExists, moveFile, `/`
+from std/stats import RunningStat
 
 when defined(posix):
   import system/ansi_c
@@ -248,7 +251,8 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
       seq[bellatrix.TrustedSignedBeaconBlock],
       seq[capella.TrustedSignedBeaconBlock],
       seq[deneb.TrustedSignedBeaconBlock],
-      seq[electra.TrustedSignedBeaconBlock])
+      seq[electra.TrustedSignedBeaconBlock],
+      seq[fulu.TrustedSignedBeaconBlock])
 
   echo "Loaded head slot ", dag.head.slot,
     " selected ", blockRefs.len, " blocks"
@@ -277,6 +281,9 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
       of ConsensusFork.Electra:
         blocks[5].add dag.db.getBlock(
           blck.root, electra.TrustedSignedBeaconBlock).get()
+      of ConsensusFork.Fulu:
+        blocks[6].add dag.db.getBlock(
+          blck.root, fulu.TrustedSignedBeaconBlock).get()
 
   let stateData = newClone(dag.headState)
 
@@ -289,13 +296,14 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
       (ref bellatrix.HashedBeaconState)(),
       (ref capella.HashedBeaconState)(),
       (ref deneb.HashedBeaconState)(),
-      (ref electra.HashedBeaconState)())
+      (ref electra.HashedBeaconState)(),
+      (ref fulu.HashedBeaconState)())
 
   withTimer(timers[tLoadState]):
     doAssert dag.updateState(
       stateData[],
       dag.atSlot(blockRefs[^1], blockRefs[^1].slot - 1).expect("not nil"),
-      false, cache)
+      false, cache, dag.updateFlags)
 
   template processBlocks(blocks: auto) =
     for b in blocks.mitems():
@@ -353,6 +361,9 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
               of ConsensusFork.Electra:
                 doAssert dbBenchmark.getState(
                   forkyState.root, loadedState[5][].data, noRollback)
+              of ConsensusFork.Fulu:
+                doAssert dbBenchmark.getState(
+                  forkyState.root, loadedState[6][].data, noRollback)
 
             if forkyState.data.slot.epoch mod 16 == 0:
               let loadedRoot = case consensusFork
@@ -362,6 +373,7 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
                 of ConsensusFork.Capella:   hash_tree_root(loadedState[3][].data)
                 of ConsensusFork.Deneb:     hash_tree_root(loadedState[4][].data)
                 of ConsensusFork.Electra:   hash_tree_root(loadedState[5][].data)
+                of ConsensusFork.Fulu:      hash_tree_root(loadedState[6][].data)
               doAssert hash_tree_root(forkyState.data) == loadedRoot
 
   processBlocks(blocks[0])
@@ -370,6 +382,7 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
   processBlocks(blocks[3])
   processBlocks(blocks[4])
   processBlocks(blocks[5])
+  processBlocks(blocks[6])
 
   printTimers(false, timers)
 
@@ -384,6 +397,7 @@ proc cmdDumpState(conf: DbConf) =
     capellaState   = (ref capella.HashedBeaconState)()
     denebState     = (ref deneb.HashedBeaconState)()
     electraState   = (ref electra.HashedBeaconState)()
+    fuluState      = (ref fulu.HashedBeaconState)()
 
   for stateRoot in conf.stateRoot:
     if shouldShutDown: quit QuitSuccess
@@ -403,6 +417,7 @@ proc cmdDumpState(conf: DbConf) =
     doit(capellaState[])
     doit(denebState[])
     doit(electraState[])
+    doit(fuluState[])
 
     echo "Couldn't load ", stateRoot
 
@@ -612,7 +627,8 @@ proc cmdExportEra(conf: DbConf, cfg: RuntimeConfig) =
 
     withTimer(timers[tState]):
       var cache: StateCache
-      if not updateState(dag, tmpState[], eraBid, false, cache):
+      if not updateState(dag, tmpState[], eraBid, false, cache,
+                         dag.updateFlags):
         notice "Skipping era, state history not available", era, name
         missingHistory = true
         continue
@@ -628,7 +644,7 @@ proc cmdExportEra(conf: DbConf, cfg: RuntimeConfig) =
       if firstSlot.isSome():
         withTimer(timers[tBlocks]):
           var blocks: array[SLOTS_PER_HISTORICAL_ROOT.int, BlockId]
-          for i in dag.getBlockRange(firstSlot.get(), 1, blocks)..<blocks.len:
+          for i in dag.getBlockRange(firstSlot.get(), blocks)..<blocks.len:
             if not dag.getBlockSZ(blocks[i], tmp):
               break writeFileBlock
             group.update(e2, blocks[i].slot, tmp).get()
@@ -753,7 +769,7 @@ proc cmdValidatorPerf(conf: DbConf, cfg: RuntimeConfig) =
   doAssert dag.updateState(
     state[],
     dag.atSlot(blockRefs[^1], blockRefs[^1].slot - 1).expect("block found"),
-    false, cache)
+    false, cache, dag.updateFlags)
 
   proc processEpoch() =
     let
@@ -777,8 +793,7 @@ proc cmdValidatorPerf(conf: DbConf, cfg: RuntimeConfig) =
       indices
     case info.kind
     of EpochInfoFork.Phase0:
-      template info: untyped = info.phase0Data
-      for i, s in info.validators:
+      for i, s in info.phase0Data.validators:
         let perf = addr perfs[i]
         if RewardFlags.isActiveInPreviousEpoch in s.flags:
           if s.is_previous_epoch_attester.isSome():
@@ -889,11 +904,11 @@ proc createInsertValidatorProc(db: SqStoreRef): auto =
     VALUES(?, ?);""",
     (int64, array[48, byte]), void).expect("DB")
 
-proc collectBalances(balances: var seq[uint64], forkedState: ForkedHashedBeaconState) =
+func collectBalances(balances: var seq[uint64], forkedState: ForkedHashedBeaconState) =
   withState(forkedState):
     balances = seq[uint64](forkyState.data.balances.data)
 
-proc calculateDelta(info: RewardsAndPenalties): int64 =
+func calculateDelta(info: RewardsAndPenalties): int64 =
   info.source_outcome +
   info.target_outcome +
   info.head_outcome +
@@ -1052,10 +1067,12 @@ proc cmdValidatorDb(conf: DbConf, cfg: RuntimeConfig) =
   let slot = if startEpochSlot > 0: startEpochSlot - 1 else: 0.Slot
   if blockRefs.len > 0:
     discard dag.updateState(
-      tmpState[], dag.atSlot(blockRefs[^1], slot).expect("block"), false, cache)
+      tmpState[], dag.atSlot(blockRefs[^1], slot).expect("block"), false, cache,
+                             dag.updateFlags)
   else:
     discard dag.updateState(
-      tmpState[], dag.getBlockIdAtSlot(slot).expect("block"), false, cache)
+      tmpState[], dag.getBlockIdAtSlot(slot).expect("block"), false, cache,
+      dag.updateFlags)
 
   let savedValidatorsCount = outDb.getDbValidatorsCount
   var validatorsCount = getStateField(tmpState[], validators).len
@@ -1097,9 +1114,9 @@ proc cmdValidatorDb(conf: DbConf, cfg: RuntimeConfig) =
             rp.inclusion_delay = block:
               let notSlashed = (RewardFlags.isSlashed notin validator.flags)
               if notSlashed and validator.is_previous_epoch_attester.isSome():
-                some(validator.is_previous_epoch_attester.get().delay.uint64)
+                Opt.some(validator.is_previous_epoch_attester.get().delay.uint64)
               else:
-                none(uint64)
+                Opt.none(uint64)
 
           if conf.writeUnaggregatedFiles:
             csvLines.add rp.serializeToCsv

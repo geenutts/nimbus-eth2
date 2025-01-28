@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -49,13 +49,11 @@ func compute_deltas(
 logScope: topics = "fork_choice"
 
 func init*(
-    T: type ForkChoiceBackend, checkpoints: FinalityCheckpoints,
-    version: ForkChoiceVersion): T =
-  T(proto_array: ProtoArray.init(checkpoints, version))
+    T: type ForkChoiceBackend, checkpoints: FinalityCheckpoints): T =
+  T(proto_array: ProtoArray.init(checkpoints))
 
 proc init*(
-    T: type ForkChoice, epochRef: EpochRef, blck: BlockRef,
-    version: ForkChoiceVersion): T =
+    T: type ForkChoice, epochRef: EpochRef, blck: BlockRef): T =
   ## Initialize a fork choice context for a finalized state - in the finalized
   ## state, the justified and finalized checkpoints are the same, so only one
   ## is used here
@@ -67,10 +65,8 @@ proc init*(
     backend: ForkChoiceBackend.init(
       FinalityCheckpoints(
         justified: checkpoint,
-        finalized: checkpoint),
-      version),
+        finalized: checkpoint)),
     checkpoints: Checkpoints(
-      version: version,
       justified: BalanceCheckpoint(
         checkpoint: checkpoint,
         total_active_balance: epochRef.total_active_balance,
@@ -113,7 +109,7 @@ proc update_justified(
   self.update_justified(dag, blck, justified.epoch)
   ok()
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/phase0/fork-choice.md#update_checkpoints
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/fork-choice.md#update_checkpoints
 proc update_checkpoints(
     self: var Checkpoints, dag: ChainDAGRef,
     checkpoints: FinalityCheckpoints): FcResult[void] =
@@ -377,7 +373,7 @@ proc get_head*(self: var ForkChoice,
     self.checkpoints.justified.balances,
     self.checkpoints.proposer_boost_root)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/fork_choice/safe-block.md#get_safe_beacon_block_root
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/fork_choice/safe-block.md#get_safe_beacon_block_root
 func get_safe_beacon_block_root*(self: ForkChoice): Eth2Digest =
   # Use most recent justified block as a stopgap
   self.checkpoints.justified.checkpoint.root
@@ -773,7 +769,7 @@ when isMainModule:
     indices.add fakeHash(1), 0
     indices.add fakeHash(2), 1
 
-    # 1 validator at the start, 2 at the end
+    # 2 validator at the start, 1 at the end
     var deltas = newSeqUninitialized[Delta](2)
     let old_balances = @[Balance, Balance]
     let new_balances = @[Balance]

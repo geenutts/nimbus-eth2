@@ -12,7 +12,6 @@ import
   chronicles, chronos, metrics,
   taskpools,
   ../spec/[helpers, forks],
-  ../spec/datatypes/[altair, phase0, deneb],
   ../consensus_object_pools/[
     blob_quarantine, block_clearance, block_quarantine, blockchain_dag,
     attestation_pool, light_client_pool, sync_committee_msg_pool,
@@ -51,10 +50,6 @@ declareCounter beacon_attester_slashings_received,
   "Number of valid attester slashings processed by this node"
 declareCounter beacon_attester_slashings_dropped,
   "Number of invalid attester slashings dropped by this node", labels = ["reason"]
-declareCounter bls_to_execution_change_received,
-  "Number of valid BLS to execution changes processed by this node"
-declareCounter bls_to_execution_change_dropped,
-  "Number of invalid BLS to execution changes dropped by this node", labels = ["reason"]
 declareCounter beacon_proposer_slashings_received,
   "Number of valid proposer slashings processed by this node"
 declareCounter beacon_proposer_slashings_dropped,
@@ -174,7 +169,7 @@ proc new*(T: type Eth2Processor,
           blobQuarantine: ref BlobQuarantine,
           rng: ref HmacDrbgContext,
           getBeaconTime: GetBeaconTimeFn,
-          taskpool: TaskPoolPtr
+          taskpool: Taskpool
          ): ref Eth2Processor =
   (ref Eth2Processor)(
     doppelgangerDetectionEnabled: doppelgangerDetectionEnabled,
@@ -338,12 +333,12 @@ proc setupDoppelgangerDetection*(self: var Eth2Processor, slot: Slot) =
       epoch = slot.epoch,
       broadcast_epoch = self.doppelgangerDetection.broadcastStartEpoch
 
-proc clearDoppelgangerProtection*(self: var Eth2Processor) =
+func clearDoppelgangerProtection*(self: var Eth2Processor) =
   self.doppelgangerDetection.broadcastStartEpoch = FAR_FUTURE_EPOCH
 
 proc checkForPotentialDoppelganger(
     self: var Eth2Processor,
-    attestation: phase0.Attestation | electra.Attestation,
+    attestation: phase0.Attestation | electra.Attestation | SingleAttestation,
     attesterIndices: openArray[ValidatorIndex]) =
   # Only check for attestations after node launch. There might be one slot of
   # overlap in quick intra-slot restarts so trade off a few true negatives in
@@ -365,8 +360,8 @@ proc checkForPotentialDoppelganger(
 
 proc processAttestation*(
     self: ref Eth2Processor, src: MsgSource,
-    attestation: phase0.Attestation | electra.Attestation, subnet_id: SubnetId,
-    checkSignature, checkValidator: bool
+    attestation: phase0.Attestation | SingleAttestation,
+    subnet_id: SubnetId, checkSignature, checkValidator: bool
 ): Future[ValidationRes] {.async: (raises: [CancelledError]).} =
   var wallTime = self.getCurrentBeaconTime()
   let (afterGenesis, wallSlot) = wallTime.toSlot()
@@ -385,14 +380,14 @@ proc processAttestation*(
   debug "Attestation received", delay
 
   # Now proceed to validation
-  let v =
-    await self.attestationPool.validateAttestation(
-      self.batchCrypto, attestation, wallTime, subnet_id, checkSignature)
+  let v = await self.attestationPool.validateAttestation(
+    self.batchCrypto, attestation, wallTime, subnet_id, checkSignature)
   return if v.isOk():
     # Due to async validation the wallTime here might have changed
     wallTime = self.getCurrentBeaconTime()
 
-    let (attester_index, sig) = v.get()
+    let (attester_index, beacon_committee_len, index_in_committee, sig) =
+      v.get()
 
     if checkValidator and (attester_index in self.validatorPool[]):
       warn "A validator client has attempted to send an attestation from " &
@@ -405,7 +400,8 @@ proc processAttestation*(
 
       trace "Attestation validated"
       self.attestationPool[].addAttestation(
-        attestation, [attester_index], sig, wallTime)
+        attestation, [attester_index], beacon_committee_len,
+        index_in_committee, sig, wallTime)
 
       self.validatorMonitor[].registerAttestation(
         src, wallTime, attestation, attester_index)
@@ -461,8 +457,11 @@ proc processSignedAggregateAndProof*(
 
     trace "Aggregate validated"
 
+    # -1 here is the notional index in committee for which the attestation pool
+    # only requires external input regarding SingleAttestation messages.
     self.attestationPool[].addAttestation(
-      signedAggregateAndProof.message.aggregate, attesting_indices, sig,
+      signedAggregateAndProof.message.aggregate, attesting_indices,
+      signedAggregateAndProof.message.aggregate.aggregation_bits.len, -1, sig,
       wallTime)
 
     self.validatorMonitor[].registerAggregate(
@@ -504,7 +503,8 @@ proc processBlsToExecutionChange*(
 
 proc processAttesterSlashing*(
     self: var Eth2Processor, src: MsgSource,
-    attesterSlashing: phase0.AttesterSlashing): ValidationRes =
+    attesterSlashing: phase0.AttesterSlashing | electra.AttesterSlashing):
+    ValidationRes =
   logScope:
     attesterSlashing = shortLog(attesterSlashing)
 
@@ -621,7 +621,8 @@ proc processSyncCommitteeMessage*(
 proc processSignedContributionAndProof*(
     self: ref Eth2Processor, src: MsgSource,
     contributionAndProof: SignedContributionAndProof,
-    checkSignature: bool = true): Future[Result[void, ValidationError]] {.async: (raises: [CancelledError]).} =
+    checkSignature: bool = true):
+    Future[Result[void, ValidationError]] {.async: (raises: [CancelledError]).} =
   let
     wallTime = self.getCurrentBeaconTime()
     wallSlot = wallTime.slotOrZero()

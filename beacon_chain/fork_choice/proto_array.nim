@@ -71,9 +71,6 @@ func len*(nodes: ProtoNodes): int =
 func add(nodes: var ProtoNodes, node: ProtoNode) =
   nodes.buf.add node
 
-func isPreviousEpochJustified(self: ProtoArray): bool =
-  self.checkpoints.justified.epoch + 1 == self.currentEpoch
-
 # Forward declarations
 # ----------------------------------------------------------------------
 
@@ -90,8 +87,7 @@ func nodeLeadsToViableHead(
 # ----------------------------------------------------------------------
 
 func init*(
-    T: type ProtoArray, checkpoints: FinalityCheckpoints,
-    version: ForkChoiceVersion): T =
+    T: type ProtoArray, checkpoints: FinalityCheckpoints): T =
   let node = ProtoNode(
     bid: BlockId(
       slot: checkpoints.finalized.epoch.start_slot,
@@ -103,8 +99,7 @@ func init*(
     bestChild: none(int),
     bestDescendant: none(int))
 
-  T(version: version,
-    checkpoints: checkpoints,
+  T(checkpoints: checkpoints,
     nodes: ProtoNodes(buf: @[node], offset: 0),
     indices: {node.bid.root: 0}.toTable())
 
@@ -536,23 +531,10 @@ func nodeIsViableForHead(
     node.checkpoints.justified.epoch == self.checkpoints.justified.epoch
 
   if not correctJustified:
-    case self.version
-    of ForkChoiceVersion.Stable:
-      # If the previous epoch is justified, the block should be pulled-up.
-      # In this case, check that unrealized justification is higher than the
-      # store and that the voting source is not more than two epochs ago
-      if self.isPreviousEpochJustified and
-          node.bid.slot.epoch == self.currentEpoch:
-        let unrealized =
-          self.currentEpochTips.getOrDefault(nodeIdx, node.checkpoints)
-        correctJustified =
-          unrealized.justified.epoch >= self.checkpoints.justified.epoch and
-          node.checkpoints.justified.epoch + 2 >= self.currentEpoch
-    of ForkChoiceVersion.Pr3431:
-      # The voting source should be either at the same height as the store's
-      # justified checkpoint or not more than two epochs ago
-      correctJustified =
-        node.checkpoints.justified.epoch + 2 >= self.currentEpoch
+    # The voting source should be either at the same height as the store's
+    # justified checkpoint or not more than two epochs ago
+    correctJustified =
+      node.checkpoints.justified.epoch + 2 >= self.currentEpoch
 
   return
     if not correctJustified:
@@ -565,7 +547,7 @@ func nodeIsViableForHead(
       true
     else:
       # Check that this node is not going to be pruned
-      let 
+      let
         finalizedEpoch = self.checkpoints.finalized.epoch
         finalizedSlot = finalizedEpoch.start_slot
       var ancestor = some node
@@ -610,7 +592,7 @@ func propagateInvalidity*(
     if parentPhysicalIdx < 0 or parentPhysicalIdx >= self.nodes.len:
       continue
 
-    # Invalidity transmits to all descendents
+    # Invalidity transmits to all descendants
     if self.nodes.buf[parentPhysicalIdx].invalid:
       self.nodes.buf[nodePhysicalIdx].invalid = true
 

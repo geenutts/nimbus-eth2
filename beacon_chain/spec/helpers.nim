@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -12,9 +12,10 @@
 import
   # Status libraries
   stew/[byteutils, endians2, objects],
+  nimcrypto/sha2,
   chronicles,
   eth/common/[eth_types, eth_types_rlp],
-  eth/rlp, eth/trie/[db, hexary],
+  eth/rlp, eth/trie/ordered_trie,
   # Internal
   "."/[eth2_merkleization, forks, ssz_codec]
 
@@ -23,9 +24,9 @@ import
 # generics sandwich where rlp/writer.append() is not seen, by a caller outside
 # this module via compute_execution_block_hash() called from block_processor.
 export
-  eth2_merkleization, forks, rlp, ssz_codec
+  eth2_merkleization, forks, ssz_codec, rlp, eth_types_rlp.append
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/phase0/weak-subjectivity.md#constants
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.9/specs/phase0/weak-subjectivity.md#constants
 const ETH_TO_GWEI = 1_000_000_000.Gwei
 
 func toEther*(gwei: Gwei): Ether =
@@ -35,15 +36,6 @@ func toGwei*(eth: Ether): Gwei =
   distinctBase(eth) * ETH_TO_GWEI
 
 type
-  ExecutionHash256* = eth_types.Hash256
-  ExecutionTransaction* = eth_types.Transaction
-  ExecutionReceipt* = eth_types.Receipt
-  ExecutionWithdrawal* = eth_types.Withdrawal
-  ExecutionDepositRequest* = eth_types.DepositRequest
-  ExecutionWithdrawalRequest* = eth_types.WithdrawalRequest
-  ExecutionConsolidationRequest* = eth_types.ConsolidationRequest
-  ExecutionBlockHeader* = eth_types.BlockHeader
-
   FinalityCheckpoints* = object
     justified*: Checkpoint
     finalized*: Checkpoint
@@ -84,7 +76,7 @@ func is_exited_validator*(validator: Validator, epoch: Epoch): bool =
 func is_withdrawable_validator*(validator: Validator, epoch: Epoch): bool =
   epoch >= validator.withdrawable_epoch
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.6/specs/phase0/beacon-chain.md#get_active_validator_indices
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/beacon-chain.md#get_active_validator_indices
 iterator get_active_validator_indices*(state: ForkyBeaconState, epoch: Epoch):
     ValidatorIndex =
   for vidx in state.validators.vindices:
@@ -110,7 +102,7 @@ func get_active_validator_indices_len*(
   withState(state):
     get_active_validator_indices_len(forkyState.data, epoch)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/beacon-chain.md#get_current_epoch
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/beacon-chain.md#get_current_epoch
 func get_current_epoch*(state: ForkyBeaconState): Epoch =
   ## Return the current epoch.
   state.slot.epoch
@@ -162,7 +154,7 @@ func compute_domain*(
   result[0..3] = domain_type.data
   result[4..31] = fork_data_root.data.toOpenArray(0, 27)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/phase0/beacon-chain.md#get_domain
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#get_domain
 func get_domain*(
     fork: Fork,
     domain_type: DomainType,
@@ -192,7 +184,7 @@ func compute_signing_root*(ssz_object: auto, domain: Eth2Domain): Eth2Digest =
   )
   hash_tree_root(domain_wrapped_object)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.7/specs/phase0/beacon-chain.md#get_seed
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/phase0/beacon-chain.md#get_seed
 func get_seed*(
     state: ForkyBeaconState, epoch: Epoch, domain_type: DomainType,
     mix: Eth2Digest): Eth2Digest =
@@ -211,7 +203,7 @@ func get_seed*(state: ForkyBeaconState, epoch: Epoch, domain_type: DomainType):
     epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1)
   state.get_seed(epoch, domain_type, mix)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/altair/beacon-chain.md#add_flag
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/altair/beacon-chain.md#add_flag
 func add_flag*(flags: ParticipationFlags, flag_index: TimelyFlag): ParticipationFlags =
   let flag = ParticipationFlags(1'u8 shl ord(flag_index))
   flags or flag
@@ -221,7 +213,7 @@ func has_flag*(flags: ParticipationFlags, flag_index: TimelyFlag): bool =
   let flag = ParticipationFlags(1'u8 shl ord(flag_index))
   (flags and flag) == flag
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.4/specs/deneb/p2p-interface.md#check_blob_sidecar_inclusion_proof
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/deneb/p2p-interface.md#verify_blob_sidecar_inclusion_proof
 func verify_blob_sidecar_inclusion_proof*(
     blob_sidecar: BlobSidecar): Result[void, string] =
   let gindex = kzg_commitment_inclusion_proof_gindex(blob_sidecar.index)
@@ -235,7 +227,8 @@ func verify_blob_sidecar_inclusion_proof*(
   ok()
 
 func create_blob_sidecars*(
-    forkyBlck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock,
+    forkyBlck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock |
+    fulu.SignedBeaconBlock,
     kzg_proofs: KzgProofs,
     blobs: Blobs): seq[BlobSidecar] =
   template kzg_commitments: untyped =
@@ -258,7 +251,7 @@ func create_blob_sidecars*(
     res.add(sidecar)
   res
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/altair/light-client/sync-protocol.md#is_sync_committee_update
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/altair/light-client/sync-protocol.md#is_sync_committee_update
 template is_sync_committee_update*(update: SomeForkyLightClientUpdate): bool =
   when update is SomeForkyLightClientUpdateWithSyncCommittee:
     update.next_sync_committee_branch !=
@@ -266,7 +259,7 @@ template is_sync_committee_update*(update: SomeForkyLightClientUpdate): bool =
   else:
     false
 
-# https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.5/specs/altair/light-client/sync-protocol.md#is_finality_update
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/altair/light-client/sync-protocol.md#is_finality_update
 template is_finality_update*(update: SomeForkyLightClientUpdate): bool =
   when update is SomeForkyLightClientUpdateWithFinality:
     update.finality_branch !=
@@ -274,7 +267,7 @@ template is_finality_update*(update: SomeForkyLightClientUpdate): bool =
   else:
     false
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/altair/light-client/sync-protocol.md#is_next_sync_committee_known
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/altair/light-client/sync-protocol.md#is_next_sync_committee_known
 template is_next_sync_committee_known*(store: ForkyLightClientStore): bool =
   store.next_sync_committee !=
     static(default(typeof(store.next_sync_committee)))
@@ -387,27 +380,30 @@ func contextEpoch*(bootstrap: ForkyLightClientBootstrap): Epoch =
 func contextEpoch*(update: SomeForkyLightClientUpdate): Epoch =
   update.attested_header.beacon.slot.epoch
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/bellatrix/beacon-chain.md#is_merge_transition_complete
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/bellatrix/beacon-chain.md#is_merge_transition_complete
 func is_merge_transition_complete*(
     state: bellatrix.BeaconState | capella.BeaconState | deneb.BeaconState |
-           electra.BeaconState): bool =
+           electra.BeaconState | fulu.BeaconState): bool =
   const defaultExecutionPayloadHeader =
     default(typeof(state.latest_execution_payload_header))
   state.latest_execution_payload_header != defaultExecutionPayloadHeader
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/sync/optimistic.md#helpers
-func is_execution_block*(blck: SomeForkyBeaconBlock): bool =
-  when typeof(blck).kind >= ConsensusFork.Bellatrix:
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.9/sync/optimistic.md#helpers
+func is_execution_block*(body: SomeForkyBeaconBlockBody): bool =
+  when typeof(body).kind >= ConsensusFork.Bellatrix:
     const defaultExecutionPayload =
-      default(typeof(blck.body.execution_payload))
-    blck.body.execution_payload != defaultExecutionPayload
+      default(typeof(body.execution_payload))
+    body.execution_payload != defaultExecutionPayload
   else:
     false
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/bellatrix/beacon-chain.md#is_merge_transition_block
+func is_execution_block*(blck: SomeForkyBeaconBlock): bool =
+  blck.body.is_execution_block
+
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/bellatrix/beacon-chain.md#is_merge_transition_block
 func is_merge_transition_block(
     state: bellatrix.BeaconState | capella.BeaconState | deneb.BeaconState |
-           electra.BeaconState,
+           electra.BeaconState | fulu.BeaconState,
     body: bellatrix.BeaconBlockBody | bellatrix.TrustedBeaconBlockBody |
           bellatrix.SigVerifiedBeaconBlockBody |
           capella.BeaconBlockBody | capella.TrustedBeaconBlockBody |
@@ -415,15 +411,17 @@ func is_merge_transition_block(
           deneb.BeaconBlockBody | deneb.TrustedBeaconBlockBody |
           deneb.SigVerifiedBeaconBlockBody |
           electra.BeaconBlockBody | electra.TrustedBeaconBlockBody |
-          electra.SigVerifiedBeaconBlockBody): bool =
+          electra.SigVerifiedBeaconBlockBody |
+          fulu.BeaconBlockBody | fulu.TrustedBeaconBlockBody |
+          fulu.SigVerifiedBeaconBlockBody): bool =
   const defaultExecutionPayload = default(typeof(body.execution_payload))
   not is_merge_transition_complete(state) and
     body.execution_payload != defaultExecutionPayload
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/bellatrix/beacon-chain.md#is_execution_enabled
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/bellatrix/beacon-chain.md#is_execution_enabled
 func is_execution_enabled*(
     state: bellatrix.BeaconState | capella.BeaconState | deneb.BeaconState |
-           electra.BeaconState,
+           electra.BeaconState | fulu.BeaconState,
     body: bellatrix.BeaconBlockBody | bellatrix.TrustedBeaconBlockBody |
           bellatrix.SigVerifiedBeaconBlockBody |
           capella.BeaconBlockBody | capella.TrustedBeaconBlockBody |
@@ -431,123 +429,64 @@ func is_execution_enabled*(
           deneb.BeaconBlockBody | deneb.TrustedBeaconBlockBody |
           deneb.SigVerifiedBeaconBlockBody |
           electra.BeaconBlockBody | electra.TrustedBeaconBlockBody |
-          electra.SigVerifiedBeaconBlockBody): bool =
+          electra.SigVerifiedBeaconBlockBody |
+          fulu.BeaconBlockBody | fulu.TrustedBeaconBlockBody |
+          fulu.SigVerifiedBeaconBlockBody): bool =
   is_merge_transition_block(state, body) or is_merge_transition_complete(state)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/bellatrix/beacon-chain.md#compute_timestamp_at_slot
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/bellatrix/beacon-chain.md#compute_timestamp_at_slot
 func compute_timestamp_at_slot*(state: ForkyBeaconState, slot: Slot): uint64 =
   # Note: This function is unsafe with respect to overflows and underflows.
   let slots_since_genesis = slot - GENESIS_SLOT
   state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT
 
-proc computeTransactionsTrieRoot*(
-    payload: ForkyExecutionPayload): ExecutionHash256 =
-  if payload.transactions.len == 0:
-    return EMPTY_ROOT_HASH
+template append*(w: var RlpWriter, v: bellatrix.Transaction) =
+  w.appendRawBytes(distinctBase v)
 
-  var tr = initHexaryTrie(newMemoryDB())
-  for i, transaction in payload.transactions:
-    try:
-      # Transactions are already RLP encoded
-      tr.put(rlp.encode(i.uint), distinctBase(transaction))
-    except RlpError as exc:
-      raiseAssert "HexaryTrie.put failed: " & $exc.msg
-  tr.rootHash()
-
-func toExecutionWithdrawal*(
-    withdrawal: capella.Withdrawal): ExecutionWithdrawal =
-  ExecutionWithdrawal(
+template append*(w: var RlpWriter, withdrawal: capella.Withdrawal) =
+  w.appendRecordType(EthWithdrawal(
     index: withdrawal.index,
     validatorIndex: withdrawal.validator_index,
     address: EthAddress withdrawal.address.data,
-    amount: distinctBase(withdrawal.amount))
+    amount: distinctBase(withdrawal.amount)))
 
-# https://eips.ethereum.org/EIPS/eip-4895
-proc computeWithdrawalsTrieRoot*(
-    payload: capella.ExecutionPayload | deneb.ExecutionPayload |
-    electra.ExecutionPayload): ExecutionHash256 =
-  if payload.withdrawals.len == 0:
-    return EMPTY_ROOT_HASH
-
-  var tr = initHexaryTrie(newMemoryDB())
-  for i, withdrawal in payload.withdrawals:
-    try:
-      tr.put(rlp.encode(i.uint), rlp.encode(toExecutionWithdrawal(withdrawal)))
-    except RlpError as exc:
-      raiseAssert "HexaryTrie.put failed: " & $exc.msg
-  tr.rootHash()
-
-func toExecutionDepositRequest*(
-    request: electra.DepositRequest): ExecutionDepositRequest =
-  ExecutionDepositRequest(
-    pubkey: request.pubkey.blob,
-    withdrawalCredentials: request.withdrawal_credentials.data,
-    amount: distinctBase(request.amount),
-    signature: request.signature.blob,
-    index: request.index)
-
-func toExecutionWithdrawalRequest*(
-    request: electra.WithdrawalRequest): ExecutionWithdrawalRequest =
-  ExecutionWithdrawalRequest(
-    sourceAddress: request.source_address.data,
-    validatorPubkey: request.validator_pubkey.blob,
-    amount: distinctBase(request.amount))
-
-func toExecutionConsolidationRequest*(
-    request: electra.ConsolidationRequest): ExecutionConsolidationRequest =
-  ExecutionConsolidationRequest(
-    sourceAddress: request.source_address.data,
-    sourcePubkey: request.source_pubkey.blob,
-    targetPubkey: request.target_pubkey.blob)
+proc computeTransactionsTrieRoot(
+    payload: ForkyExecutionPayload): EthHash32 =
+  orderedTrieRoot(payload.transactions.asSeq)
 
 # https://eips.ethereum.org/EIPS/eip-7685
-proc computeRequestsTrieRoot*(
-    payload: electra.ExecutionPayload): ExecutionHash256 =
-  if payload.deposit_requests.len == 0 and
-      payload.withdrawal_requests.len == 0 and
-      payload.consolidation_requests.len == 0:
-    return EMPTY_ROOT_HASH
+func computeRequestsHash(
+    requests: electra.ExecutionRequests): EthHash32 =
 
-  var
-    tr = initHexaryTrie(newMemoryDB())
-    i = 0'u64
+  const
+    DEPOSIT_REQUEST_TYPE = 0x00'u8  # EIP-6110
+    WITHDRAWAL_REQUEST_TYPE = 0x01'u8  # EIP-7002
+    CONSOLIDATION_REQUEST_TYPE = 0x02'u8  # EIP-7251
 
-  static:
-    doAssert DEPOSIT_REQUEST_TYPE < WITHDRAWAL_REQUEST_TYPE
-    doAssert WITHDRAWAL_REQUEST_TYPE < CONSOLIDATION_REQUEST_TYPE
+  template individualHash(requestType, requestList): Digest =
+    computeDigest:
+      h.update([requestType.byte])
+      for request in requestList:
+        h.update SSZ.encode(request)
 
-  # EIP-6110
-  for request in payload.deposit_requests:
-    try:
-      tr.put(rlp.encode(i.uint), rlp.encode(
-        toExecutionDepositRequest(request)))
-    except RlpError as exc:
-      raiseAssert "HexaryTree.put failed: " & $exc.msg
-    inc i
+  let requestsHash = computeDigest:
+    template mixInRequests(requestType, requestList): untyped =
+      if requestList.len > 0:
+        h.update(individualHash(requestType, requestList).data)
 
-  # EIP-7002
-  for request in payload.withdrawal_requests:
-    try:
-      tr.put(rlp.encode(i.uint), rlp.encode(
-        toExecutionWithdrawalRequest(request)))
-    except RlpError as exc:
-      raiseAssert "HexaryTree.put failed: " & $exc.msg
-    inc i
+    static:
+      doAssert DEPOSIT_REQUEST_TYPE < WITHDRAWAL_REQUEST_TYPE
+      doAssert WITHDRAWAL_REQUEST_TYPE < CONSOLIDATION_REQUEST_TYPE
+    mixInRequests(DEPOSIT_REQUEST_TYPE, requests.deposits)
+    mixInRequests(WITHDRAWAL_REQUEST_TYPE, requests.withdrawals)
+    mixInRequests(CONSOLIDATION_REQUEST_TYPE, requests.consolidations)
 
-  # EIP-7251
-  for request in payload.consolidation_requests:
-    try:
-      tr.put(rlp.encode(i.uint), rlp.encode(
-        toExecutionConsolidationRequest(request)))
-    except RlpError as exc:
-      raiseAssert "HexaryTree.put failed: " & $exc.msg
-    inc i
+  requestsHash.to(EthHash32)
 
-  tr.rootHash()
-
-proc blockToBlockHeader*(blck: ForkyBeaconBlock): ExecutionBlockHeader =
-  template payload: auto = blck.body.execution_payload
-
+proc toExecutionBlockHeader(
+    payload: ForkyExecutionPayload,
+    parentRoot: Eth2Digest,
+    requestsHash = Opt.none(EthHash32)): EthHeader =
   static:  # `GasInt` is signed. We only use it for hashing.
     doAssert sizeof(GasInt) == sizeof(payload.gas_limit)
     doAssert sizeof(GasInt) == sizeof(payload.gas_used)
@@ -556,9 +495,9 @@ proc blockToBlockHeader*(blck: ForkyBeaconBlock): ExecutionBlockHeader =
     txRoot = payload.computeTransactionsTrieRoot()
     withdrawalsRoot =
       when typeof(payload).kind >= ConsensusFork.Capella:
-        Opt.some payload.computeWithdrawalsTrieRoot()
+        Opt.some orderedTrieRoot(payload.withdrawals.asSeq)
       else:
-        Opt.none(ExecutionHash256)
+        Opt.none(EthHash32)
     blobGasUsed =
       when typeof(payload).kind >= ConsensusFork.Deneb:
         Opt.some payload.blob_gas_used
@@ -571,37 +510,66 @@ proc blockToBlockHeader*(blck: ForkyBeaconBlock): ExecutionBlockHeader =
         Opt.none(uint64)
     parentBeaconBlockRoot =
       when typeof(payload).kind >= ConsensusFork.Deneb:
-        Opt.some ExecutionHash256(data: blck.parent_root.data)
+        Opt.some EthHash32(parentRoot.data)
       else:
-        Opt.none(ExecutionHash256)
-    requestsRoot =
-      when typeof(payload).kind >= ConsensusFork.Electra:
-        Opt.some payload.computeRequestsTrieRoot()
-      else:
-        Opt.none(ExecutionHash256)
+        Opt.none(EthHash32)
 
-  ExecutionBlockHeader(
-    parentHash            : payload.parent_hash,
+  EthHeader(
+    parentHash            : payload.parent_hash.to(Hash32),
     ommersHash            : EMPTY_UNCLE_HASH,
     coinbase              : EthAddress payload.fee_recipient.data,
-    stateRoot             : payload.state_root,
-    txRoot                : txRoot,
-    receiptsRoot          : payload.receipts_root,
-    logsBloom             : payload.logs_bloom.data,
+    stateRoot             : payload.state_root.to(Root),
+    transactionsRoot      : txRoot,
+    receiptsRoot          : payload.receipts_root.to(Root),
+    logsBloom             : Bloom payload.logs_bloom.data.to(Bloom),
     difficulty            : default(DifficultyInt),
     number                : payload.block_number,
     gasLimit              : payload.gas_limit,
     gasUsed               : payload.gas_used,
     timestamp             : EthTime(payload.timestamp),
     extraData             : payload.extra_data.asSeq,
-    mixHash               : payload.prev_randao, # EIP-4399 `mixHash` -> `prevRandao`
-    nonce                 : default(BlockNonce),
+    mixHash               : Bytes32 payload.prev_randao.data, # EIP-4399 `mixHash` -> `prevRandao`
+    nonce                 : default(Bytes8),
     baseFeePerGas         : Opt.some payload.base_fee_per_gas,
     withdrawalsRoot       : withdrawalsRoot,
     blobGasUsed           : blobGasUsed,           # EIP-4844
     excessBlobGas         : excessBlobGas,         # EIP-4844
     parentBeaconBlockRoot : parentBeaconBlockRoot, # EIP-4788
-    requestsRoot          : requestsRoot)          # EIP-7685
+    requestsHash          : requestsHash)          # EIP-7685
+
+proc compute_execution_block_hash*(
+    body: ForkyBeaconBlockBody,
+    parentRoot: Eth2Digest): Eth2Digest =
+  when typeof(body).kind >= ConsensusFork.Electra:
+    body.execution_payload.toExecutionBlockHeader(
+        parentRoot, Opt.some body.execution_requests.computeRequestsHash())
+      .rlpHash().to(Eth2Digest)
+  else:
+    body.execution_payload.toExecutionBlockHeader(parentRoot)
+      .rlpHash().to(Eth2Digest)
 
 proc compute_execution_block_hash*(blck: ForkyBeaconBlock): Eth2Digest =
-  rlpHash blockToBlockHeader(blck)
+  blck.body.compute_execution_block_hash(blck.parent_root)
+
+from std/math import exp, ln
+from std/sequtils import foldl
+
+func ln_binomial(n, k: int): float64 =
+  if k > n:
+    low(float64)
+  else:
+    template ln_factorial(n: int): float64 =
+      (2 .. n).foldl(a + ln(b.float64), 0.0)
+    ln_factorial(n) - ln_factorial(k) - ln_factorial(n - k)
+
+func hypergeom_cdf*(k: int, population: int, successes: int, draws: int):
+    float64 =
+  if k < draws + successes - population:
+    0.0
+  elif k >= min(successes, draws):
+    1.0
+  else:
+    let ln_denom = ln_binomial(population, draws)
+    (0 .. k).foldl(a + exp(
+      ln_binomial(successes, b) +
+      ln_binomial(population - successes, draws - b) - ln_denom), 0.0)

@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2024 Status Research & Development GmbH
+# Copyright (c) 2018-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -9,18 +9,18 @@
 
 import
   # Standard library
-  std/[strutils, typetraits],
+  std/[sequtils, strutils, typetraits],
   # Internals
   ./os_ops,
   ../../beacon_chain/spec/datatypes/[phase0, altair, bellatrix],
   ../../beacon_chain/spec/[
-    eth2_merkleization, eth2_ssz_serialization, forks],
+    eth2_merkleization, eth2_ssz_serialization, forks, helpers],
   # Status libs,
   snappy,
   stew/byteutils
 
 export
-  eth2_merkleization, eth2_ssz_serialization
+  eth2_merkleization, eth2_ssz_serialization, helpers
 
 # Process current EF test format
 # ---------------------------------------------
@@ -47,6 +47,13 @@ func readValue*(r: var JsonReader, a: var seq[byte]) =
 func genesisTestRuntimeConfig*(consensusFork: ConsensusFork): RuntimeConfig =
   var res = defaultRuntimeConfig
   case consensusFork
+  of ConsensusFork.Fulu:
+    res.FULU_FORK_EPOCH = GENESIS_EPOCH
+    res.ELECTRA_FORK_EPOCH = GENESIS_EPOCH
+    res.DENEB_FORK_EPOCH = GENESIS_EPOCH
+    res.CAPELLA_FORK_EPOCH = GENESIS_EPOCH
+    res.BELLATRIX_FORK_EPOCH = GENESIS_EPOCH
+    res.ALTAIR_FORK_EPOCH = GENESIS_EPOCH
   of ConsensusFork.Electra:
     res.ELECTRA_FORK_EPOCH = GENESIS_EPOCH
     res.DENEB_FORK_EPOCH = GENESIS_EPOCH
@@ -83,7 +90,7 @@ type
     rewards*: List[Gwei, Limit VALIDATOR_REGISTRY_LIMIT]
     penalties*: List[Gwei, Limit VALIDATOR_REGISTRY_LIMIT]
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.6/specs/phase0/validator.md#eth1block
+  # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/phase0/validator.md#eth1block
   Eth1Block* = object
     timestamp*: uint64
     deposit_root*: Eth2Digest
@@ -94,7 +101,7 @@ const
   FixturesDir* =
     currentSourcePath.rsplit(DirSep, 1)[0] / ".." / ".." / "vendor" / "nim-eth2-scenarios"
   SszTestsDir* = FixturesDir / "tests-v" & SPEC_VERSION
-  MaxObjectSize* = 3_000_000
+  MaxObjectSize* = 10_000_000
 
 proc relativeTestPathComponent*(path: string, suitePath = SszTestsDir): string =
   try:
@@ -167,3 +174,21 @@ proc loadForkedState*(
     forkyState.data = parseTest(path, SSZ, consensusFork.BeaconState)
     forkyState.root = hash_tree_root(forkyState.data)
   state
+
+proc loadBlock*(
+    path: string,
+    consensusFork: static ConsensusFork,
+    validateBlockHash = true): auto =
+  var blck = parseTest(path, SSZ, consensusFork.SignedBeaconBlock)
+  blck.root = hash_tree_root(blck.message)
+  when consensusFork >= ConsensusFork.Bellatrix:
+    if blck.message.is_execution_block and
+        not blck.message.body.execution_payload.transactions.anyIt(it.len == 0):
+      if blck.message.body.execution_payload.block_hash !=
+          blck.message.compute_execution_block_hash():
+        try:
+          stderr.write "Invalid `block_hash`: ", path, "\n"
+        except IOError:
+          discard
+        quit 1
+  blck
